@@ -1,0 +1,11 @@
+[package]
+name = "apheleia_mandrake"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+apheleia_bookwyrm = { version = "0.1.0", path = "../apheleia_bookwyrm" }
+apheleia_prism = { version = "0.1.0", path = "../apheleia_prism" }
+winnow = "0.5.15"

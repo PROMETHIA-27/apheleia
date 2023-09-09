@@ -1,0 +1,15 @@
+[package]
+name = "apheleia"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+apheleia_bookwyrm = { version = "0.1.0", path = "crates/apheleia_bookwyrm" }
+apheleia_mandrake = { version = "0.1.0", path = "crates/apheleia_mandrake" }
+apheleia_hydra = { version = "0.1.0", path = "crates/apheleia_hydra" }
+apheleia_narcissus = { version = "0.1.0", path = "crates/apheleia_narcissus" }
+apheleia_prism = { version = "0.1.0", path = "crates/apheleia_prism" }
+
+[workspace]
