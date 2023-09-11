@@ -7,3 +7,7 @@
 4. Narcissus: AST roots -> Module Tree
    - Merge all file ASTs together into one module tree, walking the AST to collect all declarations
    and performing name resolution
+
+## Other crates:
+- Prism: Generalized helpers related to IR representation and the Database backing the compiler
+- Macro: Macros, mostly related to Prism

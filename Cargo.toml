@@ -11,5 +11,6 @@ apheleia_mandrake = { version = "0.1.0", path = "crates/apheleia_mandrake" }
 apheleia_hydra = { version = "0.1.0", path = "crates/apheleia_hydra" }
 apheleia_narcissus = { version = "0.1.0", path = "crates/apheleia_narcissus" }
 apheleia_prism = { version = "0.1.0", path = "crates/apheleia_prism" }
+apheleia_macro = { version = "0.1.0", path = "crates/apheleia_macro" }
 
 [workspace]

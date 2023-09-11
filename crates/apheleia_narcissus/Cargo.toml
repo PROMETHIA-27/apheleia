@@ -8,3 +8,7 @@ edition = "2021"
 [dependencies]
 apheleia_hydra = { version = "0.1.0", path = "../apheleia_hydra" }
 apheleia_prism = { version = "0.1.0", path = "../apheleia_prism" }
+
+[dev-dependencies]
+apheleia_bookwyrm = { path = "../apheleia_bookwyrm" }
+apheleia_mandrake = { path = "../apheleia_mandrake" }

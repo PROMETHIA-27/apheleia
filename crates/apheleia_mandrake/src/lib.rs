@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use apheleia_bookwyrm::Token;
-use apheleia_prism::{create_row, derive_column, OnColumn, Row};
+use apheleia_prism::prelude::*;
 use winnow::combinator::{alt, cut_err, fail, opt, peek, repeat};
 use winnow::error::{ErrMode, ErrorKind, ParseError, ParserError};
 use winnow::stream::Stream;
@@ -9,9 +9,8 @@ use winnow::token::any;
 use winnow::{dispatch, PResult, Parser};
 
 pub type Span = Range<usize>;
-pub type SpanToken = (Token, Span);
-pub type SpanTokens<'i> = &'i [SpanToken];
-pub type Tokens<'o, 'i> = &'o mut &'i [SpanToken];
+pub type SpanToken<'src> = (Token<'src>, Span);
+pub type Tokens<'src> = [SpanToken<'src>];
 pub type Result<Value> = PResult<Value, ContextError>;
 pub type ContextError = winnow::error::ContextError<Context>;
 
@@ -57,123 +56,134 @@ impl<Data: std::fmt::Debug> std::fmt::Debug for Punctuated<Data> {
     }
 }
 
-derive_column!(Cst);
-#[derive(Clone, Debug)]
+// impl<Data: ColumnDebug> ColumnDebug for Punctuated<Data> {
+//     fn fmt<Col>(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result
+//     where
+//         Col: Column + ColumnDebug,
+//     {
+//         let mut list = f.debug_list();
+//         for (value, _) in &self.values {
+//             list.entry(&value.column_dbg::<Col>());
+//             list.entry(&self.separator);
+//         }
+//         match &self.last {
+//             Some(value) => _ = list.entry(&value.column_dbg::<Col>()),
+//             None => (),
+//         }
+//         list.finish()
+//     }
+// }
+
+#[derive(Clone, Component, Debug)]
 pub enum Cst {
     Module {
         /// any attached attribute lists
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
         /// the `module` keyword
         module: Span,
         /// the identifier of the module
-        name: Span,
+        name: (Span, String),
         /// the `{` and `}` tokens, if present
         braces: Option<(Span, Span)>,
         /// the items of the module
-        items: Vec<Row>,
+        items: Vec<Entity>,
     },
     Function {
         /// any attached attribute lists
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
         /// the `fn` keyword
         function: Span,
         /// the identifier of the function
-        name: Span,
+        name: (Span, String),
         /// the argument parens
         parens: (Span, Span),
         /// the arguments
-        args: Punctuated<Row>,
+        args: Punctuated<Entity>,
+        /// the `->` token and return type, if any
+        return_ty: Option<(Span, Entity)>,
         /// the `{` and `}` tokens
         braces: (Span, Span),
         /// the contents of the function
-        body: Vec<Row>,
+        body: Vec<Entity>,
         /// any items declared in the body of the function
-        items: Vec<Row>,
+        items: Vec<Entity>,
     },
     FunctionArg {
         /// the attributes of the argument
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
         /// the identifier of the argument
-        name: Span,
+        name: (Span, String),
         /// the `:` token
         colon: Span,
         /// the type of the argument
-        ty: Row,
+        ty: Entity,
     },
     RecordConstructor {
         /// the identifier of the type to construct
-        name: Span,
+        name: (Span, String),
         /// the `{` and `}` tokens
         braces: (Span, Span),
         /// the field initializers
-        fields: Punctuated<Row>,
+        fields: Punctuated<Entity>,
         /// the `..expr` part of the declaration; declares that this constructor is actually overwriting
         /// the value given by the expression. The first span is the `..` token.
-        fill: Option<(Span, Row)>,
+        fill: Option<(Span, Entity)>,
     },
     FieldInitializer {
         /// the identifier of the field
-        name: Span,
+        name: (Span, String),
         /// the `:` token
         colon: Span,
         /// the value of the field
-        value: Row,
+        value: Entity,
     },
     NameAccess {
         /// the identifier of the element
-        name: Span,
+        name: (Span, String),
         /// the arguments, if any
-        args: Option<(Span, Punctuated<Row>, Span)>,
+        args: Option<(Span, Punctuated<Entity>, Span)>,
     },
     /// This name is somewhat misleading. This can correspond to a field access, method
     /// call, or UFCS function call.
     MemberAccess {
         /// the expression having a member accessed
-        inner: Row,
+        inner: Entity,
         /// the `.` token
         dot: Span,
         /// the identifier of the member
-        name: Span,
+        name: (Span, String),
         /// the arguments of a method/UFCS call, if any
-        args: Option<(Span, Punctuated<Row>, Span)>,
+        args: Option<(Span, Punctuated<Entity>, Span)>,
     },
     StringLiteral {
         /// the literal
-        lit: Span,
+        lit: (Span, String),
     },
     CharLiteral {
         /// the literal
-        lit: Span,
+        lit: (Span, String),
     },
     Type {
         /// the identifier of the type
-        name: Span,
-    },
-    External {
-        /// any attached attribute lists
-        attributes: Vec<Row>,
-        /// the `external` identifier
-        external: Span,
-        /// the `{` and `}` tokens
-        braces: (Span, Span),
-        /// the items of this external declaration
-        items: Vec<Row>,
+        name: (Span, String),
     },
     ExternalFunc {
         /// any attached attribute lists
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
+        /// the `external` keyword
+        external: Span,
         /// the `fn` keyword
         function: Span,
         /// the identifier of the function
-        name: Span,
+        name: (Span, String),
         /// the argument parens
         parens: (Span, Span),
         /// the argument types
-        args: Punctuated<Row>,
+        args: Punctuated<Entity>,
     },
     AttributeList {
         brackets: (Span, Span),
-        attributes: Punctuated<Row>,
+        attributes: Punctuated<Entity>,
     },
     Invalid {
         span: Span,
@@ -181,64 +191,61 @@ pub enum Cst {
 }
 
 impl Cst {
-    pub fn to_column(self) -> Row {
-        create_row(self)
-    }
-
-    pub fn span(&self) -> Span {
-        match self {
-            Cst::Module {
-                module,
-                name,
-                braces,
-                items: contents,
-                ..
-            } => {
-                module.start..match braces {
-                    Some(braces) => braces.1.end,
-                    None => match contents.last() {
-                        Some(last) => last.on_column(Cst::span).end,
-                        None => name.end,
-                    },
-                }
-            }
-            Cst::Function {
-                function, braces, ..
-            } => function.start..braces.1.end,
-            Cst::FunctionArg { name, ty, .. } => name.start..ty.on_column(Cst::span).end,
-            Cst::RecordConstructor { name, braces, .. } => name.start..braces.1.end,
-            Cst::FieldInitializer { name, value, .. } => name.start..value.on_column(Cst::span).end,
-            Cst::NameAccess { name, args } => {
-                name.start..match args {
-                    Some(args) => args.2.end,
-                    None => name.end,
-                }
-            }
-            Cst::MemberAccess {
-                inner, name, args, ..
-            } => {
-                inner.on_column(Cst::span).start..match args {
-                    Some(args) => args.2.end,
-                    None => name.end,
-                }
-            }
-            Cst::StringLiteral { lit } => lit.clone(),
-            Cst::CharLiteral { lit } => lit.clone(),
-            Cst::Type { name } => name.clone(),
-            Cst::External {
-                external, braces, ..
-            } => external.start..braces.1.end,
-            Cst::ExternalFunc {
-                function, parens, ..
-            } => function.start..parens.1.end,
-            Cst::AttributeList { brackets, .. } => brackets.0.start..brackets.1.end,
-            Cst::Invalid { span } => span.clone(),
-        }
-    }
+    // pub fn span(&self) -> Span {
+    //     match self {
+    //         Cst::Module {
+    //             module,
+    //             name,
+    //             braces,
+    //             items: contents,
+    //             ..
+    //         } => {
+    //             module.start..match braces {
+    //                 Some(braces) => braces.1.end,
+    //                 None => match contents.last() {
+    //                     Some(last) => last.on_column(Cst::span).end,
+    //                     None => name.0.end,
+    //                 },
+    //             }
+    //         }
+    //         Cst::Function {
+    //             function, braces, ..
+    //         } => function.start..braces.1.end,
+    //         Cst::FunctionArg { name, ty, .. } => name.0.start..ty.on_column(Cst::span).end,
+    //         Cst::RecordConstructor { name, braces, .. } => name.0.start..braces.1.end,
+    //         Cst::FieldInitializer { name, value, .. } => {
+    //             name.0.start..value.on_column(Cst::span).end
+    //         }
+    //         Cst::NameAccess { name, args } => {
+    //             name.0.start..match args {
+    //                 Some(args) => args.2.end,
+    //                 None => name.0.end,
+    //             }
+    //         }
+    //         Cst::MemberAccess {
+    //             inner, name, args, ..
+    //         } => {
+    //             inner.on_column(Cst::span).start..match args {
+    //                 Some(args) => args.2.end,
+    //                 None => name.0.end,
+    //             }
+    //         }
+    //         Cst::StringLiteral { lit } => lit.0.clone(),
+    //         Cst::CharLiteral { lit } => lit.0.clone(),
+    //         Cst::Type { name } => name.0.clone(),
+    //         Cst::ExternalFunc {
+    //             function, parens, ..
+    //         } => function.start..parens.1.end,
+    //         Cst::AttributeList { brackets, .. } => brackets.0.start..brackets.1.end,
+    //         Cst::Invalid { span } => span.clone(),
+    //     }
+    // }
 }
 
-pub fn parse(tokens: SpanTokens) -> std::result::Result<Row, ParseError<SpanTokens, ContextError>> {
-    (|input: &mut &[(Token, Span)]| {
+pub fn parse<'toks, 'src>(
+    tokens: &'toks Tokens<'src>,
+) -> std::result::Result<Entity, ParseError<&'toks Tokens<'src>, ContextError>> {
+    (|input: &mut &Tokens| {
         let mut attributes = parse_attribute_lists(input)?;
         let mut parser = parse_module(&mut attributes);
         parser(input)
@@ -246,7 +253,7 @@ pub fn parse(tokens: SpanTokens) -> std::result::Result<Row, ParseError<SpanToke
     .parse(tokens)
 }
 
-pub fn just(token: Token) -> impl Fn(Tokens) -> Result<Span> {
+pub fn just(token: Token) -> impl Fn(&mut &Tokens) -> Result<Span> + '_ {
     move |input| {
         let start = input.checkpoint();
         let value = input
@@ -260,10 +267,55 @@ pub fn just(token: Token) -> impl Fn(Tokens) -> Result<Span> {
     }
 }
 
-pub fn punctuated<Data>(
-    parser: impl Fn(Tokens) -> Result<Data>,
-    separator: Token,
-) -> impl Fn(Tokens) -> Result<Punctuated<Data>> {
+pub fn ident(input: &mut &Tokens) -> Result<(Span, String)> {
+    let start = input.checkpoint();
+    let value = input
+        .next_token()
+        .and_then(|(tok, span)| match tok {
+            Token::Ident(ident) => Some((span, ident.to_string())),
+            _ => None,
+        })
+        .ok_or_else(|| ErrMode::from_error_kind(input, ErrorKind::Token));
+    if value.is_err() {
+        input.reset(start);
+    }
+    value
+}
+
+pub fn string(input: &mut &Tokens) -> Result<(Span, String)> {
+    let start = input.checkpoint();
+    let value = input
+        .next_token()
+        .and_then(|(tok, span)| match tok {
+            Token::String(string) => Some((span, string.to_string())),
+            _ => None,
+        })
+        .ok_or_else(|| ErrMode::from_error_kind(input, ErrorKind::Token));
+    if value.is_err() {
+        input.reset(start);
+    }
+    value
+}
+
+pub fn char(input: &mut &Tokens) -> Result<(Span, String)> {
+    let start = input.checkpoint();
+    let value = input
+        .next_token()
+        .and_then(|(tok, span)| match tok {
+            Token::Char(char) => Some((span, char.to_string())),
+            _ => None,
+        })
+        .ok_or_else(|| ErrMode::from_error_kind(input, ErrorKind::Token));
+    if value.is_err() {
+        input.reset(start);
+    }
+    value
+}
+
+pub fn punctuated<'src, Data>(
+    parser: impl Fn(&mut &Tokens<'src>) -> Result<Data> + 'src,
+    separator: Token<'src>,
+) -> impl Fn(&mut &Tokens<'src>) -> Result<Punctuated<Data>> + 'src {
     move |input| {
         let values = repeat(.., (&parser, just(separator))).parse_next(input)?;
         let check = input.checkpoint();
@@ -279,72 +331,88 @@ pub fn punctuated<Data>(
     }
 }
 
-pub fn invalid(stop_at: Token) -> impl Fn(Tokens) -> Result<Cst> {
+pub fn invalid(stop_at: Token) -> impl Fn(&mut &Tokens) -> Result<Cst> {
     // let first =
     // Ok(Cst::Invalid {})
     |input| todo!()
 }
 
-pub fn parse_module_braced_contents(input: Tokens) -> Result<((Span, Span), Vec<Row>)> {
+pub fn parse_module_braced_contents(input: &mut &Tokens) -> Result<((Span, Span), Vec<Entity>)> {
     let open_brace = just(Token::OpenBrace)(input)?;
     let items = parse_items(input)?;
     let close_brace = just(Token::CloseBrace)(input)?;
     Ok(((open_brace, close_brace), items))
 }
 
-pub fn parse_module(attributes: &mut Vec<Row>) -> impl FnMut(Tokens) -> Result<Row> + '_ {
-    |input| {
-        let (module, name) = (just(Token::Module), just(Token::Ident)).parse_next(input)?;
+pub fn parse_module<'a>(
+    mut c: Commands<'a, 'a>,
+    attributes: &'a mut Vec<Entity>,
+) -> impl FnMut(&mut &Tokens) -> Result<Entity> + 'a {
+    move |input| {
+        let (module, name) = (just(Token::Module), ident).parse_next(input)?;
         let (braces, contents) = match parse_module_braced_contents(input) {
             Ok((braces, contents)) => (Some(braces), contents),
             _ => (None, parse_items(input)?),
         };
-        Ok(Cst::Module {
+        Ok(c.spawn(Cst::Module {
             attributes: std::mem::take(attributes),
             module,
             name,
             braces,
             items: contents,
-        }
-        .to_column())
+        })
+        .id())
     }
 }
 
-pub fn parse_item(input: Tokens) -> Result<Row> {
+pub fn parse_item(input: &mut &Tokens) -> Result<Entity> {
     let mut attributes = parse_attribute_lists(input)?;
     dispatch!(peek(any);
         (Token::Fn, _) => parse_function(&mut attributes),
-        (Token::External, _) => parse_external(&mut attributes),
+        (Token::External, _) => parse_external_func(&mut attributes),
         (Token::Module, _) => parse_module(&mut attributes),
         _ => fail,
     )
     .parse_next(input)
 }
 
-pub fn parse_items(input: Tokens) -> Result<Vec<Row>> {
+pub fn parse_items(input: &mut &Tokens) -> Result<Vec<Entity>> {
     repeat(.., parse_item).parse_next(input)
 }
 
-pub fn parse_function(attributes: &mut Vec<Row>) -> impl FnMut(Tokens) -> Result<Row> + '_ {
+pub fn parse_function(
+    attributes: &mut Vec<Entity>,
+) -> impl FnMut(&mut &Tokens) -> Result<Entity> + '_ {
     move |input| {
-        let (function, name, open_paren, args, close_paren, open_brace, (body, items), close_brace) =
-            (
-                just(Token::Fn),
-                just(Token::Ident),
-                just(Token::OpenParen),
-                parse_function_args,
-                just(Token::CloseParen),
-                just(Token::OpenBrace),
-                parse_exprs_and_items,
-                just(Token::CloseBrace),
-            )
-                .parse_next(input)?;
+        let (
+            function,
+            name,
+            open_paren,
+            args,
+            close_paren,
+            return_ty,
+            open_brace,
+            (body, items),
+            close_brace,
+        ) = (
+            just(Token::Fn),
+            ident,
+            just(Token::OpenParen),
+            parse_function_args,
+            just(Token::CloseParen),
+            opt((just(Token::RArrow), parse_type)),
+            just(Token::OpenBrace),
+            parse_exprs_and_items,
+            just(Token::CloseBrace),
+        )
+            .parse_next(input)?;
         Ok(Cst::Function {
             attributes: std::mem::take(attributes),
             function,
             name,
             parens: (open_paren, close_paren),
             args,
+            return_ty,
             braces: (open_brace, close_brace),
             body,
             items,
@@ -353,18 +421,13 @@ pub fn parse_function(attributes: &mut Vec<Row>) -> impl FnMut(Tokens) -> Result
     }
 }
 
-pub fn parse_function_args(input: Tokens) -> Result<Punctuated<Row>> {
+pub fn parse_function_args(input: &mut &Tokens) -> Result<Punctuated<Entity>> {
     punctuated(parse_function_arg, Token::Comma).parse_next(input)
 }
 
-pub fn parse_function_arg(input: Tokens) -> Result<Row> {
-    let (attributes, name, colon, ty) = (
-        parse_attribute_lists,
-        just(Token::Ident),
-        just(Token::Colon),
-        parse_type,
-    )
-        .parse_next(input)?;
+pub fn parse_function_arg(input: &mut &Tokens) -> Result<Entity> {
+    let (attributes, name, colon, ty) =
+        (parse_attribute_lists, ident, just(Token::Colon), parse_type).parse_next(input)?;
     Ok(Cst::FunctionArg {
         attributes,
         name,
@@ -374,14 +437,13 @@ pub fn parse_function_arg(input: Tokens) -> Result<Row> {
     .to_column())
 }
 
-pub fn parse_field_init(input: Tokens) -> Result<Row> {
-    let (name, colon, value) =
-        (just(Token::Ident), just(Token::Colon), parse_expr).parse_next(input)?;
+pub fn parse_field_init(input: &mut &Tokens) -> Result<Entity> {
+    let (name, colon, value) = (ident, just(Token::Colon), parse_expr).parse_next(input)?;
     Ok(Cst::FieldInitializer { name, colon, value }.to_column())
 }
 
 /// Returns a tuple of (exprs, items)
-pub fn parse_exprs_and_items(input: Tokens) -> Result<(Vec<Row>, Vec<Row>)> {
+pub fn parse_exprs_and_items(input: &mut &Tokens) -> Result<(Vec<Entity>, Vec<Entity>)> {
     let mut exprs = vec![];
     let mut items = vec![];
 
@@ -407,15 +469,15 @@ pub fn parse_exprs_and_items(input: Tokens) -> Result<(Vec<Row>, Vec<Row>)> {
     Ok((exprs, items))
 }
 
-pub fn parse_expr_or_item(input: Tokens) -> Result<Row> {
+pub fn parse_expr_or_item(input: &mut &Tokens) -> Result<Entity> {
     alt((parse_item, parse_expr, fail)).parse_next(input)
 }
 
-pub fn parse_exprs(input: Tokens) -> Result<Vec<Row>> {
+pub fn parse_exprs(input: &mut &Tokens) -> Result<Vec<Entity>> {
     repeat(.., parse_expr).parse_next(input)
 }
 
-pub fn parse_atomic_expr(input: Tokens) -> Result<Row> {
+pub fn parse_atomic_expr(input: &mut &Tokens) -> Result<Entity> {
     alt((
         parse_record_ctor,
         parse_name_access,
@@ -425,8 +487,8 @@ pub fn parse_atomic_expr(input: Tokens) -> Result<Row> {
     .parse_next(input)
 }
 
-pub fn parse_record_ctor(input: Tokens) -> Result<Row> {
-    let (name, open_brace) = (just(Token::Ident), just(Token::OpenBrace)).parse_next(input)?;
+pub fn parse_record_ctor(input: &mut &Tokens) -> Result<Entity> {
+    let (name, open_brace) = (ident, just(Token::OpenBrace)).parse_next(input)?;
     let (fields, fill, close_brace) = cut_err((
         punctuated(parse_field_init, Token::Comma),
         opt((just(Token::DoubleDot), parse_expr)),
@@ -442,9 +504,9 @@ pub fn parse_record_ctor(input: Tokens) -> Result<Row> {
     .to_column())
 }
 
-pub fn parse_name_access(input: Tokens) -> Result<Row> {
+pub fn parse_name_access(input: &mut &Tokens) -> Result<Entity> {
     let (name, args) = (
-        just(Token::Ident),
+        ident,
         opt((
             just(Token::OpenParen),
             cut_err(parse_expr_list),
@@ -455,36 +517,47 @@ pub fn parse_name_access(input: Tokens) -> Result<Row> {
     Ok(Cst::NameAccess { name, args }.to_column())
 }
 
-pub fn parse_string_literal(input: Tokens) -> Result<Row> {
-    let lit = just(Token::String)(input)?;
+pub fn parse_string_literal(input: &mut &Tokens) -> Result<Entity> {
+    let lit = string(input)?;
     Ok(Cst::StringLiteral { lit }.to_column())
 }
 
-pub fn parse_char_literal(input: Tokens) -> Result<Row> {
-    let lit = just(Token::Char)(input)?;
+pub fn parse_char_literal(input: &mut &Tokens) -> Result<Entity> {
+    let lit = char(input)?;
     Ok(Cst::CharLiteral { lit }.to_column())
 }
 
-pub fn parse_expr(input: Tokens) -> Result<Row> {
+pub fn parse_expr(input: &mut &Tokens) -> Result<Entity> {
     alt((parse_member_access, parse_atomic_expr)).parse_next(input)
 }
 
-pub fn parse_expr_list(input: Tokens) -> Result<Punctuated<Row>> {
+pub fn parse_expr_list(input: &mut &Tokens) -> Result<Punctuated<Entity>> {
     punctuated(parse_expr, Token::Comma).parse_next(input)
 }
 
-pub fn parse_member_access(input: Tokens) -> Result<Row> {
-    let (inner, dot, name, args) = (
-        parse_atomic_expr,
-        just(Token::Dot),
-        just(Token::Ident),
-        opt((
-            just(Token::OpenParen),
-            parse_expr_list,
-            just(Token::CloseParen),
-        )),
-    )
-        .parse_next(input)?;
+pub fn parse_member_access(input: &mut &Tokens) -> Result<Entity> {
+    let mut inner = parse_atomic_expr(input)?;
+    let mut extension = parse_member_access_extension(input)?;
+
+    loop {
+        match parse_member_access_extension(input) {
+            Ok(ext) => {
+                let (dot, name, args) = extension;
+                inner = Cst::MemberAccess {
+                    inner,
+                    dot,
+                    name,
+                    args,
+                }
+                .to_column();
+                extension = ext;
+            }
+            Err(ErrMode::Backtrack(_)) => break,
+            Err(err) => return Err(err),
+        }
+    }
+
+    let (dot, name, args) = extension;
     Ok(Cst::MemberAccess {
         inner,
         dot,
@@ -494,64 +567,48 @@ pub fn parse_member_access(input: Tokens) -> Result<Row> {
     .to_column())
 }
 
+pub type ArgumentList = (Span, Punctuated<Entity>, Span);
+
 pub fn parse_member_access_extension(
-    input: Tokens,
-) -> Result<(Span, Span, Option<(Span, Punctuated<Row>, Span)>)> {
+    input: &mut &Tokens,
+) -> Result<(Span, (Span, String), Option<ArgumentList>)> {
+    (
+        just(Token::Dot),
+        ident,
+        opt((
+            just(Token::OpenParen),
+            punctuated(parse_expr, Token::Comma),
+            just(Token::CloseParen),
+        )),
+    )
+        .parse_next(input)
 }
 
-pub fn parse_type(input: Tokens) -> Result<Row> {
-    let name = just(Token::Ident)(input)?;
+pub fn parse_type(input: &mut &Tokens) -> Result<Entity> {
+    let name = ident(input)?;
     Ok(Cst::Type { name }.to_column())
 }
 
-pub fn parse_type_list(input: Tokens) -> Result<Punctuated<Row>> {
+pub fn parse_type_list(input: &mut &Tokens) -> Result<Punctuated<Entity>> {
     punctuated(parse_type, Token::Comma).parse_next(input)
 }
 
-pub fn parse_external(attributes: &mut Vec<Row>) -> impl FnMut(Tokens) -> Result<Row> + '_ {
+pub fn parse_external_func(
+    attributes: &mut Vec<Entity>,
+) -> impl FnMut(&mut &Tokens) -> Result<Entity> + '_ {
     |input| {
-        let (external, open_brace, contents, close_brace) = (
+        let (external, function, name, open_paren, args, close_paren) = (
             just(Token::External),
-            just(Token::OpenBrace),
-            parse_external_items,
-            just(Token::CloseBrace),
-        )
-            .parse_next(input)?;
-        Ok(Cst::External {
-            attributes: std::mem::take(attributes),
-            external,
-            braces: (open_brace, close_brace),
-            items: contents,
-        }
-        .to_column())
-    }
-}
-
-pub fn parse_external_items(input: Tokens) -> Result<Vec<Row>> {
-    repeat(.., parse_external_item).parse_next(input)
-}
-
-pub fn parse_external_item(input: Tokens) -> Result<Row> {
-    let attributes = parse_attribute_lists(input)?;
-    dispatch!(peek(any);
-        (Token::Fn, _) => parse_external_func(&attributes),
-        _ => fail,
-    )
-    .parse_next(input)
-}
-
-pub fn parse_external_func(attributes: &[Row]) -> impl Fn(Tokens) -> Result<Row> + '_ {
-    |input| {
-        let (function, name, open_paren, args, close_paren) = (
             just(Token::Fn),
-            just(Token::Ident),
+            ident,
             just(Token::OpenParen),
             parse_type_list,
             just(Token::CloseParen),
         )
             .parse_next(input)?;
         Ok(Cst::ExternalFunc {
-            attributes: attributes.to_vec(),
+            external,
+            attributes: std::mem::take(attributes),
             function,
             name,
             parens: (open_paren, close_paren),
@@ -561,7 +618,7 @@ pub fn parse_external_func(attributes: &[Row]) -> impl Fn(Tokens) -> Result<Row>
     }
 }
 
-pub fn parse_attribute_list(input: Tokens) -> Result<Row> {
+pub fn parse_attribute_list(input: &mut &Tokens) -> Result<Entity> {
     let (open_bracket, attributes, close_bracket) = (
         just(Token::OpenBracket),
         parse_expr_list,
@@ -575,17 +632,18 @@ pub fn parse_attribute_list(input: Tokens) -> Result<Row> {
     .to_column())
 }
 
-pub fn parse_attribute_lists(input: Tokens) -> Result<Vec<Row>> {
+pub fn parse_attribute_lists(input: &mut &Tokens) -> Result<Vec<Entity>> {
     repeat(.., parse_attribute_list).parse_next(input)
 }
 
 #[cfg(test)]
 mod test {
     use apheleia_bookwyrm::lex;
+    use apheleia_prism::ColumnDebug;
 
     use crate::{
-        parse_attribute_list, parse_attribute_lists, parse_expr, parse_exprs, parse_external,
-        parse_function, parse_function_args, parse_items, parse_module,
+        parse_attribute_list, parse_attribute_lists, parse_expr, parse_exprs, parse_external_func,
+        parse_function, parse_function_args, parse_items, parse_module, Cst,
     };
 
     #[test]
@@ -593,8 +651,8 @@ mod test {
         let source = "'W'.Into";
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let putc = parse_expr(&mut cursor).unwrap();
-        println!("{putc:?}");
+        let root = parse_expr(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -602,8 +660,8 @@ mod test {
         let source = "Putc('W'.Into)";
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let putc = parse_expr(&mut cursor).unwrap();
-        println!("{putc:?}");
+        let root = parse_expr(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -611,8 +669,8 @@ mod test {
         let source = "Putc('W'.Into)";
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let putc = parse_exprs(&mut cursor).unwrap();
-        println!("{putc:?}");
+        let root = parse_exprs(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -620,8 +678,8 @@ mod test {
         let source = "";
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let punct = parse_function_args(&mut cursor).unwrap();
-        println!("{punct:?}");
+        let root = parse_function_args(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -629,8 +687,8 @@ mod test {
         let source = "fn Main() { Putc('W'.Into) }";
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let func = parse_function(&mut vec![])(&mut cursor).unwrap();
-        println!("{func:?}");
+        let root = parse_function(&mut vec![])(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -641,8 +699,8 @@ mod test {
             }"#;
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let items = parse_items(&mut cursor).unwrap();
-        println!("{items:?}");
+        let root = parse_items(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -650,8 +708,8 @@ mod test {
         let source = r#"FFI { source: "C", name: "putc", ..FFI.Default }"#;
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let parsed = parse_expr(&mut cursor).unwrap();
-        println!("{parsed:?}");
+        let root = parse_expr(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -659,8 +717,8 @@ mod test {
         let source = r#"[FFI { source: "C", name: "putc", ..FFI.Default }]"#;
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let parsed = parse_attribute_list(&mut cursor).unwrap();
-        println!("{parsed:?}");
+        let root = parse_attribute_list(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
@@ -668,37 +726,38 @@ mod test {
         let source = r#"[FFI { source: "C", name: "putc", ..FFI.Default }]"#;
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let parsed = parse_attribute_lists(&mut cursor).unwrap();
-        println!("{parsed:?}");
+        let root = parse_attribute_lists(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
     pub fn parse_ffi_extern_putc() {
-        let source = r#"external {
+        let source = r#"
             [FFI { source: "C", name: "putc", ..FFI.Default }]
-            fn Putc(U8)
-        }"#;
+            external fn Putc(U8)
+        "#;
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let parsed = parse_external(&mut vec![])(&mut cursor).unwrap();
-        println!("{parsed:?}");
+        let mut attrs = parse_attribute_lists(&mut cursor).unwrap();
+        let root = parse_external_func(&mut attrs)(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 
     #[test]
     pub fn parse_putc() {
-        let source = r#"module Main
+        let source = r#"
+            module Main
 
-            external {
-                [FFI { source: "C", name: "putc", ..FFI.Default }]
-                fn Putc(U8)
-            }
+            [FFI { source: "C", name: "putc", ..FFI.Default }]
+            external fn Putc(U8)
 
             fn Main() {
-                Putc('W'.Into)
-            }"#;
+                Putc('W'.TryInto.Unwrap)
+            }
+        "#;
         let tokens = lex(source).unwrap();
         let mut cursor = &tokens[..];
-        let module = parse_module(&mut vec![])(&mut cursor).unwrap();
-        println!("{module:?}");
+        let root = parse_module(&mut vec![])(&mut cursor).unwrap();
+        println!("{:#?}", root.column_dbg::<Cst>());
     }
 }

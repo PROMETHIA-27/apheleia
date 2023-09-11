@@ -26,6 +26,7 @@ version = "0.1.0"
 dependencies = [
  "apheleia_bookwyrm",
  "apheleia_hydra",
+ "apheleia_macro",
  "apheleia_mandrake",
  "apheleia_narcissus",
  "apheleia_prism",
@@ -49,6 +50,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "apheleia_macro"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "apheleia_mandrake"
 version = "0.1.0"
 dependencies = [
@@ -61,7 +70,9 @@ dependencies = [
 name = "apheleia_narcissus"
 version = "0.1.0"
 dependencies = [
+ "apheleia_bookwyrm",
  "apheleia_hydra",
+ "apheleia_mandrake",
  "apheleia_prism",
 ]
 
@@ -69,6 +80,7 @@ dependencies = [
 name = "apheleia_prism"
 version = "0.1.0"
 dependencies = [
+ "apheleia_macro",
  "bevy_ecs",
 ]
 

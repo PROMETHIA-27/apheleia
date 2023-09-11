@@ -20,15 +20,15 @@ pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexerError> {
 
 #[derive(Clone, Copy, Debug, Logos, PartialEq, Eq)]
 #[logos(skip r"[ \t\n\f]+")]
-pub enum Token {
-    #[regex("[_a-zA-Z0-9]+")]
-    Ident,
-    #[regex(r#""[^"]+""#)]
-    String,
+pub enum Token<'source> {
+    #[regex("[_a-zA-Z0-9]+", |str| str.slice())]
+    Ident(&'source str),
+    #[regex(r#""[^"]+""#, |str| str.slice())]
+    String(&'source str),
     /// Invariant: The lexer must only produce char tokens that are surrounded by `'`
     /// and have exactly one character
-    #[regex("'.'")]
-    Char,
+    #[regex("'.'", |str| str.slice())]
+    Char(&'source str),
     #[token("module")]
     Module,
     #[token("fn")]
@@ -57,6 +57,8 @@ pub enum Token {
     Colon,
     #[token(";")]
     Semicolon,
+    #[token("->")]
+    RArrow,
 }
 
 #[cfg(test)]
@@ -70,7 +72,7 @@ mod test {
         let mut lexer = Token::lexer("Main");
         let tok = lexer.next().unwrap();
         let tok = tok.unwrap();
-        assert_eq!(tok, Ident);
+        assert_eq!(tok, Ident("Main"));
     }
 
     #[test]
@@ -78,7 +80,7 @@ mod test {
         let lexer = Token::lexer("module Main");
         let toks: Result<Vec<_>, _> = lexer.collect();
         let toks = toks.unwrap();
-        assert_eq!(&toks, &[Module, Ident]);
+        assert_eq!(&toks, &[Module, Ident("Main")]);
     }
 
     #[test]
@@ -86,7 +88,7 @@ mod test {
         let mut lexer = Token::lexer(r#""text text2""#);
         let tok = lexer.next().unwrap();
         let tok = tok.unwrap();
-        assert_eq!(tok, String);
+        assert_eq!(tok, String("\"text text2\""));
     }
 
     #[test]
@@ -94,7 +96,7 @@ mod test {
         let mut lexer = Token::lexer("'T'");
         let tok = lexer.next().unwrap();
         let tok = tok.unwrap();
-        assert_eq!(tok, Char);
+        assert_eq!(tok, Char("'T'"));
     }
 
     #[test]
@@ -119,43 +121,43 @@ mod test {
             &toks,
             &[
                 Module,
-                Ident,
+                Ident("Main"),
                 External,
                 OpenBrace,
                 OpenBracket,
-                Ident,
+                Ident("FFI"),
                 OpenBrace,
-                Ident,
+                Ident("source"),
                 Colon,
-                String,
+                String("\"C\""),
                 Comma,
-                Ident,
+                Ident("name"),
                 Colon,
-                String,
+                String("\"putc\""),
                 Comma,
                 DoubleDot,
-                Ident,
+                Ident("FFI"),
                 Dot,
-                Ident,
+                Ident("default"),
                 CloseBrace,
                 CloseBracket,
                 Fn,
-                Ident,
+                Ident("Putc"),
                 OpenParen,
-                Ident,
+                Ident("U8"),
                 CloseParen,
                 Semicolon,
                 CloseBrace,
                 Fn,
-                Ident,
+                Ident("Main"),
                 OpenParen,
                 CloseParen,
                 OpenBrace,
-                Ident,
+                Ident("Putc"),
                 OpenParen,
-                Char,
+                Char("'W'"),
                 Dot,
-                Ident,
+                Ident("Into"),
                 CloseParen,
                 CloseBrace
             ]
