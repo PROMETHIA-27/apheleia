@@ -8,4 +8,4 @@ edition = "2021"
 [dependencies]
 apheleia_bookwyrm = { version = "0.1.0", path = "../apheleia_bookwyrm" }
 apheleia_prism = { version = "0.1.0", path = "../apheleia_prism" }
-winnow = "0.5.15"
+impl-trait-for-tuples = "0.2.2"

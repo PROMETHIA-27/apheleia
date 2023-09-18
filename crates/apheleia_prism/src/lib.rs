@@ -1,134 +1,184 @@
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::path::PathBuf;
+
+use bevy_app::App;
+use bevy_ecs::component::Component;
+use bevy_ecs::entity::Entity;
+use bevy_ecs::system::Resource;
+use bevy_ecs::world::World;
 
 pub mod prelude {
-    pub use apheleia_macro::ColumnDebug;
+    pub use apheleia_macro::EcsTreeDebug;
+
     pub use bevy_ecs;
-    pub use bevy_ecs::component::Component;
-    pub use bevy_ecs::component::TableStorage;
-    pub use bevy_ecs::entity::Entity;
-    pub use bevy_ecs::query::Without;
-    pub use bevy_ecs::query::{QueryState, WorldQuery};
-    pub use bevy_ecs::system::Commands;
-    pub use bevy_ecs::world::World;
+    pub use bevy_ecs::prelude::*;
+
+    pub use bevy_app;
+    pub use bevy_app::prelude::*;
+
+    pub use super::{
+        build_compiler, ir_tree, DebugAsEcsTree, EcsTreeDebug, RootNode, RunAppOnce, SourceFiles,
+    };
 }
 
-pub struct DebugAsColumn<T, Col>(T, PhantomData<Col>);
+pub fn build_compiler(sources: &[&str]) -> App {
+    let mut app = App::empty();
+    app.insert_resource(SourceFiles {
+        files: sources
+            .iter()
+            .map(|src| (PathBuf::new(), src.to_string()))
+            .collect(),
+    });
+    app
+}
 
-// impl<Col: Column + ColumnDebug, T: ColumnDebug> Debug for DebugAsColumn<T, Col> {
-//     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-//         T::fmt::<Col>(&self.0, f)
-//     }
-// }
+pub trait RunAppOnce {
+    fn run_once(&mut self);
+}
 
-// pub trait ColumnDebug {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug;
+impl RunAppOnce for App {
+    fn run_once(&mut self) {
+        while !self.ready() {
+            #[cfg(not(target_arch = "wasm32"))]
+            bevy_tasks::tick_global_task_pools_on_main_thread();
+        }
+        self.finish();
+        self.cleanup();
 
-//     fn column_dbg<Col>(&self) -> DebugAsColumn<&Self, Col> {
-//         DebugAsColumn(self, PhantomData)
-//     }
-// }
+        self.update();
+    }
+}
 
-// impl<T: ColumnDebug> ColumnDebug for &T {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         T::fmt::<Col>(self, f)
-//     }
-// }
+#[derive(Resource)]
+pub struct SourceFiles {
+    pub files: BTreeMap<PathBuf, String>,
+}
 
-// impl ColumnDebug for Row {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         self.on_column(|col: &Col| col.fmt::<Col>(f))
-//     }
-// }
+#[derive(Component)]
+pub struct RootNode;
 
-// impl ColumnDebug for char {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         <Self as Debug>::fmt(self, f)
-//     }
-// }
+pub struct DebugAsEcsTree<'w, T, C>(&'w World, T, PhantomData<C>);
 
-// impl ColumnDebug for String {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         <Self as Debug>::fmt(self, f)
-//     }
-// }
+impl<'w, T, C> std::fmt::Debug for DebugAsEcsTree<'w, T, C>
+where
+    T: EcsTreeDebug,
+    C: Component + EcsTreeDebug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.1.fmt::<C>(self.0, f)
+    }
+}
 
-// impl<T: ColumnDebug> ColumnDebug for Vec<T> {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         let mut list = f.debug_list();
-//         for item in self {
-//             list.entry(&item.column_dbg::<Col>());
-//         }
-//         list.finish()
-//     }
-// }
+pub trait EcsTreeDebug {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug;
 
-// impl ColumnDebug for std::ops::Range<usize> {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         <Self as Debug>::fmt(self, f)
-//     }
-// }
+    fn component_dbg<'w, C>(&self, world: &'w World) -> DebugAsEcsTree<'w, &Self, C> {
+        DebugAsEcsTree(world, self, PhantomData)
+    }
+}
 
-// impl<T: ColumnDebug, U: ColumnDebug> ColumnDebug for (T, U) {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         f.write_fmt(format_args!(
-//             "({:?}, {:?})",
-//             &self.0.column_dbg::<Col>(),
-//             &self.1.column_dbg::<Col>()
-//         ))
-//     }
-// }
+impl<T: EcsTreeDebug> EcsTreeDebug for &T {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        T::fmt::<C>(self, world, f)
+    }
+}
 
-// impl<T: ColumnDebug, U: ColumnDebug, V: ColumnDebug> ColumnDebug for (T, U, V) {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         f.write_fmt(format_args!(
-//             "({:?}, {:?}, {:?})",
-//             &self.0.column_dbg::<Col>(),
-//             &self.1.column_dbg::<Col>(),
-//             &self.2.column_dbg::<Col>(),
-//         ))
-//     }
-// }
+impl EcsTreeDebug for Entity {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        world.get::<C>(*self).unwrap().fmt::<C>(world, f)
+    }
+}
 
-// impl<T: ColumnDebug> ColumnDebug for Option<T> {
-//     fn fmt<Col>(&self, f: &mut Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         match self {
-//             Some(value) => f
-//                 .debug_tuple("Some")
-//                 .field(&value.column_dbg::<Col>())
-//                 .finish(),
-//             None => f.write_str("None"),
-//         }
-//     }
-// }
+impl EcsTreeDebug for char {
+    fn fmt<Col>(&self, _: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        Col: Component + EcsTreeDebug,
+    {
+        <Self as std::fmt::Debug>::fmt(self, f)
+    }
+}
+
+impl EcsTreeDebug for String {
+    fn fmt<Col>(&self, _: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        Col: Component + EcsTreeDebug,
+    {
+        <Self as std::fmt::Debug>::fmt(self, f)
+    }
+}
+
+impl<T: EcsTreeDebug> EcsTreeDebug for Vec<T> {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        let mut list = f.debug_list();
+        for item in self {
+            list.entry(&item.component_dbg::<C>(world));
+        }
+        list.finish()
+    }
+}
+
+impl EcsTreeDebug for std::ops::Range<usize> {
+    fn fmt<C>(&self, _: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        <Self as std::fmt::Debug>::fmt(self, f)
+    }
+}
+
+impl<T: EcsTreeDebug, U: EcsTreeDebug> EcsTreeDebug for (T, U) {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        f.write_fmt(format_args!(
+            "({:?}, {:?})",
+            &self.0.component_dbg::<C>(world),
+            &self.1.component_dbg::<C>(world)
+        ))
+    }
+}
+
+impl<T: EcsTreeDebug, U: EcsTreeDebug, V: EcsTreeDebug> EcsTreeDebug for (T, U, V) {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        f.write_fmt(format_args!(
+            "({:?}, {:?}, {:?})",
+            &self.0.component_dbg::<C>(world),
+            &self.1.component_dbg::<C>(world),
+            &self.2.component_dbg::<C>(world),
+        ))
+    }
+}
+
+impl<T: EcsTreeDebug> EcsTreeDebug for Option<T> {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        match self {
+            Some(value) => f
+                .debug_tuple("Some")
+                .field(&value.component_dbg::<C>(world))
+                .finish(),
+            None => f.write_str("None"),
+        }
+    }
+}
 
 #[macro_export]
 macro_rules! ir_tree {

@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 
-use apheleia_hydra::Ast;
-use apheleia_prism::{
-    derive_column, insert_column, ir_tree, on_query, ApplyQueue, ColumnDebug, Database, DeferQueue,
-    Query, QueryState, Row, WORLD,
-};
+use apheleia_hydra::{Ast, LowerCst};
+use apheleia_prism::prelude::*;
 
-derive_column!(Namespace);
+#[derive(Component)]
 pub struct Namespace(String);
 
 impl Namespace {
@@ -21,62 +18,62 @@ impl Namespace {
     }
 }
 
-derive_column!(QualifiedName);
+/// The namespace and name that uniquely identifies an item. Modules do not have qualified names,
+/// they are namespaces themselves.
+#[derive(Component)]
 pub struct QualifiedName {
     pub namespace: String,
     pub name: String,
 }
 
-derive_column!(Item);
+#[derive(Component)]
 pub enum Item {
     Function,
     ExternalFunction,
 }
 
-derive_column!(VisibleItems);
-#[derive(Debug, Default)]
+#[derive(Component, Debug, Default)]
 pub struct VisibleItems {
-    pub items: HashMap<String, Row>,
+    pub items: HashMap<String, Entity>,
 }
 
-derive_column!(ParentScope);
-pub struct ParentScope(Row);
+#[derive(Component)]
+pub struct ParentScope(Entity);
 
-derive_column!(Hir);
 ir_tree! {
     #[from(Ast)]
-    #[derive(ColumnDebug)]
+    #[derive(Component, EcsTreeDebug)]
     pub enum Hir {
         unchanged {
             Module {
-                attributes: Vec<Row>,
+                attributes: Vec<Entity>,
                 name: String,
-                items: Vec<Row>,
+                items: Vec<Entity>,
             },
             Function {
-                attributes: Vec<Row>,
+                attributes: Vec<Entity>,
                 name: String,
-                args: Vec<Row>,
-                return_ty: Option<Row>,
-                body: Vec<Row>,
-                items: Vec<Row>,
+                args: Vec<Entity>,
+                return_ty: Option<Entity>,
+                body: Vec<Entity>,
+                items: Vec<Entity>,
             },
             Argument {
-                attributes: Vec<Row>,
+                attributes: Vec<Entity>,
                 name: String,
-                ty: Row,
+                ty: Entity,
             },
             Type {
                 name: String,
             },
             RecordConstructor {
                 name: String,
-                fields: Vec<Row>,
-                fill: Option<Row>,
+                fields: Vec<Entity>,
+                fill: Option<Entity>,
             },
             FieldInitializer {
                 name: String,
-                value: Row,
+                value: Entity,
             },
             StringLiteral {
                 string: String,
@@ -85,356 +82,344 @@ ir_tree! {
                 char: char,
             },
             ExternalFunction {
-                attributes: Vec<Row>,
+                attributes: Vec<Entity>,
                 name: String,
-                args: Vec<Row>,
+                args: Vec<Entity>,
             },
             AttributeList {
-                attributes: Vec<Row>,
+                attributes: Vec<Entity>,
             },
         }
         new {
             FunctionCall {
-                function: Row,
-                args: Vec<Row>,
+                function: Entity,
+                args: Vec<Entity>,
             },
         }
     }
 }
 
-pub fn lower_ast(roots: &[Row]) {
-    attach_declarations(roots);
+pub struct NarcissusPlugin;
 
-    for &root in roots {
-        let mut queue = DeferQueue::default();
-        WORLD.with(|db| {
-            let mut db = db.borrow_mut();
-            let mut asts = db.query::<&Ast>();
-            let mut parents = db.query::<&ParentScope>();
-            let mut visible_items = db.query::<&VisibleItems>();
+impl Plugin for NarcissusPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Main,
+            (
+                walk_declarations,
+                apply_deferred,
+                build_visible_items,
+                apply_deferred,
+                lower_ast,
+                apply_deferred,
+            )
+                .chain()
+                .in_set(LowerAst)
+                .after(LowerCst),
+        );
+    }
+}
 
-            let mut stack = vec![StackFrame::Init { ast: root }];
-            let mut scope = None;
+#[derive(Clone, Debug, Hash, SystemSet, PartialEq, Eq)]
+pub struct LowerAst;
 
-            while let Some(frame) = stack.pop() {
-                lower_ast_node(
-                    frame,
-                    &mut asts,
-                    &mut parents,
-                    &mut visible_items,
-                    &db,
-                    &mut scope,
-                    &mut stack,
-                    &mut queue,
-                );
-            }
-        });
-        queue.finish();
+pub fn lower_ast(
+    mut c: Commands,
+    roots: Query<Entity, With<RootNode>>,
+    asts: Query<&Ast>,
+    visible_items: Query<&VisibleItems>,
+) {
+    for root in &roots {
+        lower_ast_node(root, &asts, &visible_items, None, &mut c);
     }
 
-    // Helpers
-
-    enum StackFrame {
-        Init { ast: Row },
-        PopScope { old_scope: Option<Row> },
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn lower_ast_node(
-        frame: StackFrame,
-        asts: &mut QueryState<&Ast>,
-        parents: &mut QueryState<&ParentScope>,
-        visible_items: &mut QueryState<&VisibleItems>,
-        db: &Database,
-        scope: &mut Option<Row>,
-        stack: &mut Vec<StackFrame>,
-        queue: &mut DeferQueue,
+        ast: Entity,
+        asts: &Query<&Ast>,
+        visible_items: &Query<&VisibleItems>,
+        scope: Option<Entity>,
+        c: &mut Commands,
     ) {
-        match frame {
-            StackFrame::Init { ast } => match asts.get(db, ast).unwrap() {
-                scope_ast @ (Ast::Module { .. } | Ast::Function { .. }) => {
-                    let old_scope = *scope;
-                    *scope = Some(ast);
-                    match scope_ast {
-                        Ast::Module {
-                            attributes, items, ..
-                        } => {
-                            for &ast in attributes {
-                                stack.push(StackFrame::Init { ast });
-                            }
-                            stack.push(StackFrame::PopScope { old_scope });
-                            for &ast in items {
-                                stack.push(StackFrame::Init { ast });
-                            }
+        match asts.get(ast).unwrap() {
+            node @ Ast::Module {
+                attributes, items, ..
+            } => {
+                for &attr in attributes {
+                    lower_ast_node(attr, asts, visible_items, scope, c);
+                }
+                for &item in items {
+                    lower_ast_node(item, asts, visible_items, Some(ast), c);
+                }
+                c.entity(ast).insert(Hir::from(node));
+            }
+            node @ Ast::Function {
+                attributes,
+                args,
+                body,
+                items,
+                return_ty,
+                ..
+            } => {
+                for &attr in attributes {
+                    lower_ast_node(attr, asts, visible_items, scope, c);
+                }
+                for &arg in args {
+                    lower_ast_node(arg, asts, visible_items, scope, c);
+                }
+                return_ty.map(|ty| lower_ast_node(ty, asts, visible_items, scope, c));
+                for &item in items {
+                    lower_ast_node(item, asts, visible_items, Some(ast), c);
+                }
+                for &expr in body {
+                    lower_ast_node(expr, asts, visible_items, Some(ast), c);
+                }
+                c.entity(ast).insert(Hir::from(node));
+            }
+            function_call @ (Ast::NameAccess { .. } | Ast::MemberAccess { .. }) => {
+                let (name, args) = match function_call {
+                    Ast::NameAccess { name, args, .. } => (name, args.clone()),
+                    Ast::MemberAccess {
+                        name, inner, args, ..
+                    } => (name, [inner].into_iter().chain(args).copied().collect()),
+                    _ => unreachable!(),
+                };
+                let scope_items = visible_items.get(scope.unwrap()).unwrap();
+                // TODO: This unwrap is an assertion that all names are in scope
+                let function = *scope_items.items.get(&name[..]).unwrap();
+                c.entity(ast).insert(Hir::FunctionCall { function, args });
+                match function_call {
+                    Ast::NameAccess { args, .. } => {
+                        for &ast in args {
+                            lower_ast_node(ast, asts, visible_items, scope, c);
                         }
-                        Ast::Function {
-                            attributes,
-                            args,
-                            body,
-                            items,
-                            return_ty,
-                            ..
-                        } => {
-                            for &ast in attributes {
-                                stack.push(StackFrame::Init { ast });
-                            }
-                            for &ast in args {
-                                stack.push(StackFrame::Init { ast });
-                            }
-                            return_ty.map(|ast| stack.push(StackFrame::Init { ast }));
-                            stack.push(StackFrame::PopScope { old_scope });
-                            for &ast in items {
-                                stack.push(StackFrame::Init { ast });
-                            }
-                            for &ast in body {
-                                stack.push(StackFrame::Init { ast });
-                            }
+                    }
+                    Ast::MemberAccess { inner, args, .. } => {
+                        for &ast in args {
+                            lower_ast_node(ast, asts, visible_items, scope, c);
                         }
-                        _ => unreachable!(),
+                        lower_ast_node(*inner, asts, visible_items, scope, c);
                     }
-                    queue.push(insert_column::<Hir>(scope_ast.into(), ast));
+                    _ => unreachable!(),
                 }
-                function_call @ (Ast::NameAccess { .. } | Ast::MemberAccess { .. }) => {
-                    let (name, args) = match function_call {
-                        Ast::NameAccess { name, args, .. } => (name, args.clone()),
-                        Ast::MemberAccess {
-                            name, inner, args, ..
-                        } => (name, [inner].into_iter().chain(args).copied().collect()),
-                        _ => unreachable!(),
-                    };
-                    let scope_items = visible_items.get(db, scope.unwrap()).unwrap();
-                    // TODO: This unwrap is an assertion that all names are in scope
-                    let function = *scope_items.items.get(&name[..]).unwrap();
-                    queue.push(insert_column(Hir::FunctionCall { function, args }, ast));
-                    match function_call {
-                        Ast::NameAccess { args, .. } => {
-                            for &ast in args {
-                                stack.push(StackFrame::Init { ast });
-                            }
-                        }
-                        Ast::MemberAccess { inner, args, .. } => {
-                            for &ast in args {
-                                stack.push(StackFrame::Init { ast });
-                            }
-                            stack.push(StackFrame::Init { ast: *inner });
-                        }
-                        _ => unreachable!(),
-                    }
+            }
+            node @ Ast::Argument { attributes, ty, .. } => {
+                for &ast in attributes {
+                    lower_ast_node(ast, asts, visible_items, scope, c);
                 }
-                node @ Ast::Argument { attributes, ty, .. } => {
-                    for &ast in attributes {
-                        stack.push(StackFrame::Init { ast });
-                    }
-                    stack.push(StackFrame::Init { ast: *ty });
-                    queue.push(insert_column::<Hir>(node.into(), ast))
+                lower_ast_node(*ty, asts, visible_items, scope, c);
+                c.entity(ast).insert(Hir::from(node));
+            }
+            node @ Ast::Type { .. } => _ = c.entity(ast).insert(Hir::from(node)),
+            node @ Ast::RecordConstructor { fields, fill, .. } => {
+                for &ast in fields {
+                    lower_ast_node(ast, asts, visible_items, scope, c);
                 }
-                node @ Ast::Type { .. } => queue.push(insert_column::<Hir>(node.into(), ast)),
-                node @ Ast::RecordConstructor { fields, fill, .. } => {
-                    for &ast in fields {
-                        stack.push(StackFrame::Init { ast });
-                    }
-                    for &ast in fill {
-                        stack.push(StackFrame::Init { ast });
-                    }
-                    queue.push(insert_column::<Hir>(node.into(), ast))
+                for &ast in fill {
+                    lower_ast_node(ast, asts, visible_items, scope, c);
                 }
-                node @ Ast::FieldInitializer { value, .. } => {
-                    stack.push(StackFrame::Init { ast: *value });
-                    queue.push(insert_column::<Hir>(node.into(), ast))
+                c.entity(ast).insert(Hir::from(node));
+            }
+            node @ Ast::FieldInitializer { value, .. } => {
+                lower_ast_node(*value, asts, visible_items, scope, c);
+                c.entity(ast).insert(Hir::from(node));
+            }
+            node @ Ast::StringLiteral { .. } => {
+                c.entity(ast).insert(Hir::from(node));
+            }
+            node @ Ast::CharLiteral { .. } => {
+                c.entity(ast).insert(Hir::from(node));
+            }
+            node @ Ast::ExternalFunction {
+                attributes, args, ..
+            } => {
+                for &ast in attributes {
+                    lower_ast_node(ast, asts, visible_items, scope, c);
                 }
-                node @ Ast::StringLiteral { .. } => {
-                    queue.push(insert_column::<Hir>(node.into(), ast))
+                for &ast in args {
+                    lower_ast_node(ast, asts, visible_items, scope, c);
                 }
-                node @ Ast::CharLiteral { .. } => {
-                    queue.push(insert_column::<Hir>(node.into(), ast))
+                c.entity(ast).insert(Hir::from(node));
+            }
+            node @ Ast::AttributeList { attributes } => {
+                for &ast in attributes {
+                    lower_ast_node(ast, asts, visible_items, scope, c);
                 }
-                node @ Ast::ExternalFunction {
-                    attributes, args, ..
-                } => {
-                    for &ast in attributes {
-                        stack.push(StackFrame::Init { ast });
-                    }
-                    for &ast in args {
-                        stack.push(StackFrame::Init { ast });
-                    }
-                    queue.push(insert_column::<Hir>(node.into(), ast))
-                }
-                node @ Ast::AttributeList { attributes } => {
-                    for &ast in attributes {
-                        stack.push(StackFrame::Init { ast });
-                    }
-                    queue.push(insert_column::<Hir>(node.into(), ast))
-                }
-                Ast::Invalid { .. } => todo!(),
-            },
-            StackFrame::PopScope { old_scope } => *scope = old_scope,
+                c.entity(ast).insert(Hir::from(node));
+            }
+            Ast::Invalid { .. } => todo!(),
         };
     }
 }
 
-pub fn attach_declarations(roots: &[Row]) {
-    for &ast in roots {
-        walk_declarations(ast);
-    }
-    for &ast in roots {
-        build_visible_items(ast)
-    }
-}
+pub fn walk_declarations(
+    mut c: Commands,
+    roots: Query<Entity, With<RootNode>>,
+    asts: Query<&Ast>,
+    world: &World,
+) {
+    let scope_names = &mut vec![];
+    let scopes = &mut vec![];
 
-pub fn walk_declarations(ast: Row) {
-    let mut queue = DeferQueue::default();
-
-    on_query(|mut query: Query<&Ast>| {
-        let scope_names = &mut vec![];
-        let scopes = &mut vec![];
-        let mut stack = vec![StackFrame::Init { row: ast }];
-
-        while let Some(frame) = stack.pop() {
-            match frame {
-                StackFrame::Init { row } => {
-                    handle_stack_init(&mut query, row, scope_names, scopes, &mut stack, &mut queue)
-                }
-                StackFrame::Cleanup { row } => match query.get(row) {
-                    Ast::Module { .. } | Ast::Function { .. } => {
-                        scope_names.pop();
-                    }
-                    _ => unreachable!(
-                        "internal compiler invariant violated; attempted to cleanup non-scope"
-                    ),
-                },
-            }
-        }
-    });
-
-    queue.finish();
-
-    // Helpers
-
-    enum StackFrame {
-        Init { row: Row },
-        Cleanup { row: Row },
+    for ast in &roots {
+        walk_declarations_impl(&asts, ast, scope_names, scopes, &mut c, world);
     }
 
-    fn handle_stack_init<'ast: 'stack, 'stack>(
-        query: &mut Query<'ast, &Ast>,
-        row: Row,
-        scope_names: &mut Vec<&'stack str>,
-        scopes: &mut Vec<Row>,
-        stack: &mut Vec<StackFrame>,
-        queue: &mut DeferQueue,
+    fn walk_declarations_impl<'ast>(
+        asts: &'ast Query<&Ast>,
+        ast: Entity,
+        scope_names: &mut Vec<&'ast str>,
+        scopes: &mut Vec<Entity>,
+        c: &mut Commands,
+        world: &World,
     ) {
-        match query.get(row) {
+        match asts.get(ast).unwrap() {
             Ast::Module {
                 name,
                 items,
                 ..
             } => {
                 scope_names.push(name);
-                scopes.push(row);
-                queue.push(insert_column(Namespace::from_parts(scope_names), row));
+                scopes.push(ast);
+                c.entity(ast).insert(Namespace::from_parts(scope_names));
                 if let Some(scope) = scopes.last() {
-                    queue.push(insert_column(ParentScope(*scope), row));
+                    c.entity(ast).insert(ParentScope(*scope));
                 }
-                stack.push(StackFrame::Cleanup { row });
-                for &row in items {
-                    stack.push(StackFrame::Init { row })
+                for &ast in items {
+                    walk_declarations_impl(asts, ast, scope_names, scopes, c, world);
                 }
+                scopes.pop();
+                scope_names.pop();
             }
             Ast::Function {
                 name,
                 items,
                 ..
             } => {
-                queue.push(insert_column(Item::Function, row));
+                c.entity(ast).insert(Item::Function);
                 let namespace = Namespace::from_parts(scope_names);
-                queue.push(insert_column(
-                    QualifiedName {
-                        namespace: namespace.0.clone(),
-                        name: name.to_string(),
-                    },
-                    row,
-                ));
-                queue.push(insert_column(namespace, row));
-                queue.push(insert_column(ParentScope(*scopes.last().unwrap()), row));
+                c.entity(ast).insert((QualifiedName {
+                    namespace: namespace.0.clone(),
+                    name: name.to_string(),
+                }, namespace, ParentScope(*scopes.last().unwrap())));
                 scope_names.push(name);
-                scopes.push(row);
-                stack.push(StackFrame::Cleanup { row });
-                for &row in items {
-                    stack.push(StackFrame::Init { row })
+                scopes.push(ast);
+                for &ast in items {
+                    walk_declarations_impl(asts, ast, scope_names, scopes, c, world);
                 }
+                scope_names.pop();
+                scopes.pop();
             }
             Ast::ExternalFunction {
                 name, ..
             } => {
-                queue.push(insert_column(Item::ExternalFunction, row));
-                queue.push(insert_column(ParentScope(*scopes.last().unwrap()), row));
-                queue.push(insert_column(
+                c.entity(ast).insert((
+                    Item::ExternalFunction,
+                    ParentScope(*scopes.last().unwrap()),
                     QualifiedName {
                         namespace: Namespace::from_parts(scope_names).0,
                         name: name.to_string(),
-                    },
-                    row,
-                ))
+                    }
+                ));
             }
             kind => unreachable!(
                 "internal compiler invariant violated; attempted to walk ast node of kind {:?} during declaration collection",
-                kind.column_dbg::<Ast>()
+                kind.component_dbg::<Ast>(world)
             ),
         }
     }
 }
 
-pub fn build_visible_items(ast: Row) {
-    let mut queue = DeferQueue::default();
+pub fn build_visible_items(
+    mut c: Commands,
+    roots: Query<Entity, With<RootNode>>,
+    asts: Query<&Ast>,
+    parents: Query<&ParentScope>,
+    names: Query<&QualifiedName>,
+) {
+    for ast in &roots {
+        build_visible_items_impl(&mut c, ast, &asts, &parents, &names);
+    }
 
-    WORLD.with(|db| {
-        let mut db = db.borrow_mut();
-        let mut asts = db.query::<&Ast>();
-        let mut parents = db.query::<&ParentScope>();
-        let mut names = db.query::<&QualifiedName>();
-        let mut stack = vec![ast];
+    fn build_visible_items_impl(
+        c: &mut Commands,
+        ast: Entity,
+        asts: &Query<&Ast>,
+        parents: &Query<&ParentScope>,
+        names: &Query<&QualifiedName>,
+    ) {
+        let mut vis = VisibleItems::default();
 
-        while let Some(scope) = stack.pop() {
-            let mut vis = VisibleItems::default();
-
-            match asts.get(&db, scope).unwrap() {
-                scope_ast @ (Ast::Module { items, name, .. } | Ast::Function { items, name, .. }) => {
-                    if let Ast::Function { .. } = scope_ast {
-                        if let Ok(&ParentScope(parent)) = parents.get(&db, scope) {
-                            match asts.get(&db, parent).unwrap() {
+        match asts.get(ast).unwrap() {
+                Ast::Module { items, name, .. } => {
+                        if let Ok(&ParentScope(parent)) = parents.get(ast) {
+                            match asts.get(parent).unwrap() {
                                 Ast::Module { items, .. } | Ast::Function { items, .. } => {
                                     for &item in items {
-                                        let name = names.get(&db, item).unwrap().name.clone();
+                                        let name = names.get(item).unwrap().name.clone();
                                         vis.items.insert(name, item);
                                     }
                                 },
                                 _ => unreachable!("internal compiler invariant violated: parent scope was not a scope"),
                             }
                         }
-                    }
-                    vis.items.insert(name.to_string(), scope);
-                    for &item in items {
-                        let name = names.get(&db, item).unwrap().name.clone();
+                    vis.items.insert(name.to_string(), ast);
+                    for &item in items.iter().filter(|&&item| asts.get(item).unwrap().is_scope()) {
+                        let name = names.get(item).unwrap().name.clone();
                         vis.items.insert(name, item);
-                        stack.push(item);
+                        build_visible_items_impl(c,item, asts, parents, names);
                     }
                 }
+                 Ast::Function { items, name, .. } => {
+                        if let Ok(&ParentScope(parent)) = parents.get(ast) {
+                            match asts.get(parent).unwrap() {
+                                Ast::Module { items, .. } | Ast::Function { items, .. } => {
+                                    for &item in items {
+                                        let name = names.get(item).unwrap().name.clone();
+                                        vis.items.insert(name, item);
+                                    }
+                                },
+                                _ => unreachable!("internal compiler invariant violated: parent scope was not a scope"),
+                            }
+                        }
+
+                    vis.items.insert(name.to_string(), ast);
+                    for &item in items.iter().filter(|&&item| asts.get(item).unwrap().is_scope()) {
+                        let name = names.get(item).unwrap().name.clone();
+                        vis.items.insert(name, item);
+                        build_visible_items_impl(c,item, asts, parents, names);
+                    }
+                 }
                 Ast::ExternalFunction { .. } => {},
                 _ => unreachable!("internal compiler invariant violated, attempted to build visible items for a non-scope node"),
             }
 
-            queue.push(insert_column(vis, scope));
-        }
-    });
-
-    queue.finish();
+        c.entity(ast).insert(vis);
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use apheleia_prism::ColumnDebug;
+    use apheleia_hydra::HydraPlugin;
+    use apheleia_mandrake::MandrakePlugin;
+    use apheleia_prism::prelude::*;
 
-    use crate::Hir;
+    use crate::{Hir, NarcissusPlugin};
+
+    fn lower_source(source: &str) {
+        let mut compiler = build_compiler(&[source]);
+        compiler
+            .add_plugins((MandrakePlugin, HydraPlugin, NarcissusPlugin))
+            .run_once();
+
+        println!(
+            "{:#?}",
+            compiler
+                .world
+                .query_filtered::<Entity, With<RootNode>>()
+                .single(&compiler.world)
+                .component_dbg::<Hir>(&compiler.world)
+        );
+    }
 
     #[test]
     fn cross_file_function_call() {
@@ -443,14 +428,32 @@ mod test {
 
             fn Foo() {}
         "#;
-        let tokens = apheleia_bookwyrm::lex(source1).unwrap();
-        let root = apheleia_mandrake::parse(&tokens).unwrap();
-        apheleia_hydra::lower_cst(source);
+        let source2 = r#"
+            module Two
+
+            fn Bar() {
+                Foo()
+            }
+        "#;
+
+        let mut compiler = build_compiler(&[source1, source2]);
+        compiler
+            .add_plugins((MandrakePlugin, HydraPlugin, NarcissusPlugin))
+            .run_once();
+
+        for root in compiler
+            .world
+            .query_filtered::<Entity, With<RootNode>>()
+            .iter(&compiler.world)
+        {
+            println!("{:#?}", root.component_dbg::<Hir>(&compiler.world));
+        }
     }
 
     #[test]
     fn lower_putc() {
-        let source = r#"
+        lower_source(
+            r#"
             module Main
 
             fn FFI() {}
@@ -467,11 +470,7 @@ mod test {
             fn Main() {
                 Putc('W'.TryInto.Unwrap)
             }
-            "#;
-        let tokens = apheleia_bookwyrm::lex(source).unwrap();
-        let root = apheleia_mandrake::parse(&tokens).unwrap();
-        apheleia_hydra::lower_cst();
-        crate::lower_ast(&[root]);
-        println!("{:#?}", root.column_dbg::<Hir>());
+            "#,
+        );
     }
 }

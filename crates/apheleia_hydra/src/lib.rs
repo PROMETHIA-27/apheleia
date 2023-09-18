@@ -1,50 +1,47 @@
-use apheleia_mandrake::{Cst, Span};
-use apheleia_prism::{
-    derive_column, insert_column_soft, insert_to_row, on_query, ApplyQueue, ColumnDebug,
-    DeferQueue, Query, Row, Without,
-};
+use apheleia_mandrake::{Cst, ParseSources, Span};
+use apheleia_prism::prelude::bevy_ecs::system::Query;
+use apheleia_prism::prelude::*;
 
-derive_column!(Ast);
-#[derive(ColumnDebug)]
+#[derive(Component, EcsTreeDebug)]
 pub enum Ast {
     Module {
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
         name: String,
-        items: Vec<Row>,
+        items: Vec<Entity>,
     },
     Function {
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
         name: String,
-        args: Vec<Row>,
-        return_ty: Option<Row>,
-        body: Vec<Row>,
-        items: Vec<Row>,
+        args: Vec<Entity>,
+        return_ty: Option<Entity>,
+        body: Vec<Entity>,
+        items: Vec<Entity>,
     },
     Argument {
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
         name: String,
-        ty: Row,
+        ty: Entity,
     },
     Type {
         name: String,
     },
     RecordConstructor {
         name: String,
-        fields: Vec<Row>,
-        fill: Option<Row>,
+        fields: Vec<Entity>,
+        fill: Option<Entity>,
     },
     FieldInitializer {
         name: String,
-        value: Row,
+        value: Entity,
     },
     NameAccess {
         name: String,
-        args: Vec<Row>,
+        args: Vec<Entity>,
     },
     MemberAccess {
-        inner: Row,
+        inner: Entity,
         name: String,
-        args: Vec<Row>,
+        args: Vec<Entity>,
     },
     StringLiteral {
         string: String,
@@ -53,12 +50,12 @@ pub enum Ast {
         char: char,
     },
     ExternalFunction {
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
         name: String,
-        args: Vec<Row>,
+        args: Vec<Entity>,
     },
     AttributeList {
-        attributes: Vec<Row>,
+        attributes: Vec<Entity>,
     },
     Invalid {
         span: Span,
@@ -66,21 +63,34 @@ pub enum Ast {
 }
 
 impl Ast {
-    pub fn add_to(self, row: Row) -> Row {
-        insert_to_row(self, row)
+    pub fn is_scope(&self) -> bool {
+        matches!(self, Ast::Module { .. } | Ast::Function { .. })
     }
 }
 
-pub fn lower_cst() {
-    let mut deferred = DeferQueue::default();
-    on_query(|mut query: Query<(Row, &Cst), Without<Ast>>| {
-        for (row, cst) in query.iter() {
-            let ast = lower_cst_node(cst);
+pub struct HydraPlugin;
 
-            deferred.push(insert_column(ast, row));
-        }
-    });
-    deferred.finish();
+impl Plugin for HydraPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Main,
+            (lower_cst, apply_deferred)
+                .chain()
+                .in_set(LowerCst)
+                .after(ParseSources),
+        );
+    }
+}
+
+#[derive(Clone, Debug, Hash, SystemSet, PartialEq, Eq)]
+pub struct LowerCst;
+
+pub fn lower_cst(mut c: Commands, query: Query<(Entity, &Cst), Without<Ast>>) {
+    for (row, cst) in query.iter() {
+        let ast = lower_cst_node(cst);
+
+        c.entity(row).insert(ast);
+    }
 }
 
 pub fn lower_cst_node(cst: &Cst) -> Ast {
@@ -177,18 +187,27 @@ pub fn lower_cst_node(cst: &Cst) -> Ast {
 
 #[cfg(test)]
 mod test {
-    use apheleia_prism::ColumnDebug;
+    use apheleia_mandrake::MandrakePlugin;
+    use apheleia_prism::prelude::*;
 
-    use crate::{lower_cst, Ast};
+    use crate::{Ast, HydraPlugin};
 
-    #[test]
-    pub fn lower_triple_member_access() {
-        let source = "foo.bar.baz.yeet";
-        let tokens = apheleia_bookwyrm::lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = apheleia_mandrake::parse_expr(&mut cursor).unwrap();
-        lower_cst();
-        println!("{:#?}", root.column_dbg::<Ast>());
+    fn lower_source(source: &str) {
+        println!("Source: {source:?}");
+
+        let mut compiler = build_compiler(&[source]);
+        compiler
+            .add_plugins((MandrakePlugin, HydraPlugin))
+            .run_once();
+
+        println!(
+            "{:#?}",
+            compiler
+                .world
+                .query_filtered::<Entity, With<RootNode>>()
+                .single(&compiler.world)
+                .component_dbg::<Ast>(&compiler.world)
+        );
     }
 
     #[test]
@@ -203,9 +222,6 @@ mod test {
                 Putc('W'.Into)
             }
             "#;
-        let tokens = apheleia_bookwyrm::lex(source).unwrap();
-        let root = apheleia_mandrake::parse(&tokens).unwrap();
-        lower_cst();
-        println!("{:#?}", root.column_dbg::<Ast>());
+        lower_source(source);
     }
 }

@@ -2,8 +2,8 @@ use proc_macro::{Span, TokenStream};
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, Error};
 
-#[proc_macro_derive(ColumnDebug)]
-pub fn derive_column_debug(tokens: TokenStream) -> TokenStream {
+#[proc_macro_derive(EcsTreeDebug)]
+pub fn derive_ecs_tree_debug(tokens: TokenStream) -> TokenStream {
     let input = parse_macro_input!(tokens as DeriveInput);
     let output = match input.data {
         syn::Data::Enum(data) => {
@@ -21,7 +21,7 @@ pub fn derive_column_debug(tokens: TokenStream) -> TokenStream {
                                 #type_name::#variant_name { #(#field_names,)* } => f
                                     .debug_struct(stringify!(#variant_name))
                                     #(
-                                        .field(stringify!(#field_names), &#field_names.column_dbg::<#type_name>())
+                                        .field(stringify!(#field_names), &#field_names.component_dbg::<#type_name>(world))
                                     )*
                                     .finish(),
                             }
@@ -35,8 +35,8 @@ pub fn derive_column_debug(tokens: TokenStream) -> TokenStream {
                 })
                 .collect();
             quote! {
-                impl ::apheleia_prism::ColumnDebug for #type_name {
-                    fn fmt<Col>(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+                impl ::apheleia_prism::EcsTreeDebug for #type_name {
+                    fn fmt<C>(&self, world: &World, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                         match self {
                             #(#variant_branches)*
                         }
@@ -47,7 +47,7 @@ pub fn derive_column_debug(tokens: TokenStream) -> TokenStream {
         _ => {
             return Error::new(
                 Span::call_site().into(),
-                "ColumnDebug derive is only valid on enums",
+                "EcsTreeDebug derive is only valid on enums",
             )
             .to_compile_error()
             .into()

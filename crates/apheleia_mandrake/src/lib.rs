@@ -2,20 +2,22 @@ use std::ops::Range;
 
 use apheleia_bookwyrm::Token;
 use apheleia_prism::prelude::*;
-use winnow::combinator::{alt, cut_err, fail, opt, peek, repeat};
-use winnow::error::{ErrMode, ErrorKind, ParseError, ParserError};
-use winnow::stream::Stream;
-use winnow::token::any;
-use winnow::{dispatch, PResult, Parser};
+use apheleia_prism::EcsTreeDebug;
+pub use parsing::*;
+
+mod parsing;
+
+#[derive(Debug)]
+pub struct Backtrack;
+pub type PResult<Value> = Result<Value, Backtrack>;
+
+pub struct Context<'w, 's> {
+    pub commands: Commands<'w, 's>,
+    pub errors: (),
+}
 
 pub type Span = Range<usize>;
-pub type SpanToken<'src> = (Token<'src>, Span);
-pub type Tokens<'src> = [SpanToken<'src>];
-pub type Result<Value> = PResult<Value, ContextError>;
-pub type ContextError = winnow::error::ContextError<Context>;
-
-#[derive(Debug, Clone)]
-pub enum Context {}
+pub type Tokens<'src> = [(Token<'src>, Span)];
 
 #[derive(Clone)]
 pub struct Punctuated<Data> {
@@ -56,25 +58,25 @@ impl<Data: std::fmt::Debug> std::fmt::Debug for Punctuated<Data> {
     }
 }
 
-// impl<Data: ColumnDebug> ColumnDebug for Punctuated<Data> {
-//     fn fmt<Col>(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result
-//     where
-//         Col: Column + ColumnDebug,
-//     {
-//         let mut list = f.debug_list();
-//         for (value, _) in &self.values {
-//             list.entry(&value.column_dbg::<Col>());
-//             list.entry(&self.separator);
-//         }
-//         match &self.last {
-//             Some(value) => _ = list.entry(&value.column_dbg::<Col>()),
-//             None => (),
-//         }
-//         list.finish()
-//     }
-// }
+impl<Data: EcsTreeDebug> EcsTreeDebug for Punctuated<Data> {
+    fn fmt<C>(&self, world: &World, f: &mut std::fmt::Formatter) -> std::fmt::Result
+    where
+        C: Component + EcsTreeDebug,
+    {
+        let mut list = f.debug_list();
+        for (value, _) in &self.values {
+            list.entry(&value.component_dbg::<C>(world));
+            list.entry(&self.separator);
+        }
+        match &self.last {
+            Some(value) => _ = list.entry(&value.component_dbg::<C>(world)),
+            None => (),
+        }
+        list.finish()
+    }
+}
 
-#[derive(Clone, Component, Debug)]
+#[derive(Clone, Component, Debug, EcsTreeDebug)]
 pub enum Cst {
     Module {
         /// any attached attribute lists
@@ -191,6 +193,10 @@ pub enum Cst {
 }
 
 impl Cst {
+    pub fn spawn(self, ctx: &mut Context) -> Entity {
+        ctx.commands.spawn(self).id()
+    }
+
     // pub fn span(&self) -> Span {
     //     match self {
     //         Cst::Module {
@@ -242,87 +248,74 @@ impl Cst {
     // }
 }
 
-pub fn parse<'toks, 'src>(
-    tokens: &'toks Tokens<'src>,
-) -> std::result::Result<Entity, ParseError<&'toks Tokens<'src>, ContextError>> {
-    (|input: &mut &Tokens| {
-        let mut attributes = parse_attribute_lists(input)?;
-        let mut parser = parse_module(&mut attributes);
-        parser(input)
+pub struct MandrakePlugin;
+
+impl Plugin for MandrakePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Main,
+            (parse_sources, apply_deferred).chain().in_set(ParseSources),
+        );
+    }
+}
+
+#[derive(Clone, Debug, Hash, SystemSet, PartialEq, Eq)]
+pub struct ParseSources;
+
+pub fn parse_sources(c: Commands, sources: Res<SourceFiles>) {
+    let mut ctx = Context {
+        commands: c,
+        errors: (),
+    };
+    for (_, source) in sources.files.iter() {
+        // TODO: Dump these errors into errors/turn into invalid nodes
+        let tokens = apheleia_bookwyrm::lex(source).unwrap();
+        let root = parse(&mut ctx, &tokens[..]).unwrap();
+        ctx.commands.entity(root).insert(RootNode);
+    }
+}
+
+pub fn parse(ctx: &mut Context, mut tokens: &Tokens) -> std::result::Result<Entity, ()> {
+    (|ctx: &mut Context, input: &mut &Tokens| {
+        let attributes = parse_attribute_lists(ctx, input)?;
+        parse_module(attributes).parse(ctx, input)
     })
-    .parse(tokens)
+    .parse_whole(ctx, &mut tokens)
+    .map_err(|_| ())
 }
 
-pub fn just(token: Token) -> impl Fn(&mut &Tokens) -> Result<Span> + '_ {
-    move |input| {
-        let start = input.checkpoint();
-        let value = input
-            .next_token()
-            .and_then(|(tok, span)| (tok == token).then_some(span))
-            .ok_or_else(|| ErrMode::from_error_kind(input, ErrorKind::Token));
-        if value.is_err() {
-            input.reset(start);
-        }
-        value
-    }
-}
-
-pub fn ident(input: &mut &Tokens) -> Result<(Span, String)> {
-    let start = input.checkpoint();
-    let value = input
-        .next_token()
-        .and_then(|(tok, span)| match tok {
-            Token::Ident(ident) => Some((span, ident.to_string())),
-            _ => None,
-        })
-        .ok_or_else(|| ErrMode::from_error_kind(input, ErrorKind::Token));
-    if value.is_err() {
-        input.reset(start);
-    }
-    value
-}
-
-pub fn string(input: &mut &Tokens) -> Result<(Span, String)> {
-    let start = input.checkpoint();
-    let value = input
-        .next_token()
+fn string(_: &mut Context, input: &mut &Tokens) -> PResult<(Span, String)> {
+    input
+        .next()
         .and_then(|(tok, span)| match tok {
             Token::String(string) => Some((span, string.to_string())),
             _ => None,
         })
-        .ok_or_else(|| ErrMode::from_error_kind(input, ErrorKind::Token));
-    if value.is_err() {
-        input.reset(start);
-    }
-    value
+        .ok_or(Backtrack)
 }
 
-pub fn char(input: &mut &Tokens) -> Result<(Span, String)> {
-    let start = input.checkpoint();
-    let value = input
-        .next_token()
+fn char(_: &mut Context, input: &mut &Tokens) -> PResult<(Span, String)> {
+    input
+        .next()
         .and_then(|(tok, span)| match tok {
             Token::Char(char) => Some((span, char.to_string())),
             _ => None,
         })
-        .ok_or_else(|| ErrMode::from_error_kind(input, ErrorKind::Token));
-    if value.is_err() {
-        input.reset(start);
-    }
-    value
+        .ok_or(Backtrack)
 }
 
-pub fn punctuated<'src, Data>(
-    parser: impl Fn(&mut &Tokens<'src>) -> Result<Data> + 'src,
+pub fn punctuated<'src, P, Output>(
+    mut parser: P,
     separator: Token<'src>,
-) -> impl Fn(&mut &Tokens<'src>) -> Result<Punctuated<Data>> + 'src {
-    move |input| {
-        let values = repeat(.., (&parser, just(separator))).parse_next(input)?;
-        let check = input.checkpoint();
-        let last = parser(input).ok();
-        if last.is_none() {
-            input.reset(check);
-        }
+) -> impl Parser<Output = Punctuated<Output>> + 'src
+where
+    P: MutParser<Output = Output> + 'src,
+    for<'a> &'a mut P: MutParser<Output = Output>,
+{
+    move |ctx: &mut Context, input: &mut &Tokens| {
+        let values = repeat(.., (&mut parser, just(separator))).parse(ctx, input)?;
+        let last = opt(parser).parse(ctx, input)?;
+
         Ok(Punctuated {
             values,
             last,
@@ -331,59 +324,51 @@ pub fn punctuated<'src, Data>(
     }
 }
 
-pub fn invalid(stop_at: Token) -> impl Fn(&mut &Tokens) -> Result<Cst> {
-    // let first =
-    // Ok(Cst::Invalid {})
-    |input| todo!()
-}
-
-pub fn parse_module_braced_contents(input: &mut &Tokens) -> Result<((Span, Span), Vec<Entity>)> {
-    let open_brace = just(Token::OpenBrace)(input)?;
-    let items = parse_items(input)?;
-    let close_brace = just(Token::CloseBrace)(input)?;
+pub fn parse_module_braced_contents(
+    ctx: &mut Context,
+    input: &mut &Tokens,
+) -> PResult<((Span, Span), Vec<Entity>)> {
+    let open_brace = just(Token::OpenBrace).parse(ctx, input)?;
+    let items = parse_items(ctx, input)?;
+    let close_brace = just(Token::CloseBrace).parse(ctx, input)?;
     Ok(((open_brace, close_brace), items))
 }
 
-pub fn parse_module<'a>(
-    mut c: Commands<'a, 'a>,
-    attributes: &'a mut Vec<Entity>,
-) -> impl FnMut(&mut &Tokens) -> Result<Entity> + 'a {
-    move |input| {
-        let (module, name) = (just(Token::Module), ident).parse_next(input)?;
-        let (braces, contents) = match parse_module_braced_contents(input) {
-            Ok((braces, contents)) => (Some(braces), contents),
-            _ => (None, parse_items(input)?),
+pub fn parse_module(attributes: Vec<Entity>) -> impl Parser<Output = Entity> {
+    move |ctx: &mut Context, input: &mut &Tokens| {
+        let (module, name) = (just(Token::Module), ident).parse(ctx, input)?;
+        let (braces, contents) = match opt(parse_module_braced_contents).parse(ctx, input)? {
+            Some((braces, contents)) => (Some(braces), contents),
+            _ => (None, parse_items(ctx, input)?),
         };
-        Ok(c.spawn(Cst::Module {
-            attributes: std::mem::take(attributes),
+        Ok(Cst::Module {
+            attributes,
             module,
             name,
             braces,
             items: contents,
-        })
-        .id())
+        }
+        .spawn(ctx))
     }
 }
 
-pub fn parse_item(input: &mut &Tokens) -> Result<Entity> {
-    let mut attributes = parse_attribute_lists(input)?;
-    dispatch!(peek(any);
-        (Token::Fn, _) => parse_function(&mut attributes),
-        (Token::External, _) => parse_external_func(&mut attributes),
-        (Token::Module, _) => parse_module(&mut attributes),
-        _ => fail,
-    )
-    .parse_next(input)
+pub fn parse_item(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    let attributes = parse_attribute_lists(ctx, input)?;
+
+    match input.peek().ok_or(Backtrack)?.0 {
+        Token::Fn => parse_function(attributes).parse(ctx, input),
+        Token::External => parse_external_func(attributes).parse(ctx, input),
+        Token::Module => parse_module(attributes).parse(ctx, input),
+        _ => Err(Backtrack),
+    }
 }
 
-pub fn parse_items(input: &mut &Tokens) -> Result<Vec<Entity>> {
-    repeat(.., parse_item).parse_next(input)
+pub fn parse_items(ctx: &mut Context, input: &mut &Tokens) -> PResult<Vec<Entity>> {
+    repeat(.., parse_item).parse(ctx, input)
 }
 
-pub fn parse_function(
-    attributes: &mut Vec<Entity>,
-) -> impl FnMut(&mut &Tokens) -> Result<Entity> + '_ {
-    move |input| {
+pub fn parse_function(attributes: Vec<Entity>) -> impl Parser<Output = Entity> {
+    move |ctx: &mut Context, input: &mut &[(Token<'_>, Range<usize>)]| {
         let (
             function,
             name,
@@ -405,9 +390,9 @@ pub fn parse_function(
             parse_exprs_and_items,
             just(Token::CloseBrace),
         )
-            .parse_next(input)?;
+            .parse(ctx, input)?;
         Ok(Cst::Function {
-            attributes: std::mem::take(attributes),
+            attributes,
             function,
             name,
             parens: (open_paren, close_paren),
@@ -417,145 +402,148 @@ pub fn parse_function(
             body,
             items,
         }
-        .to_column())
+        .spawn(ctx))
     }
 }
 
-pub fn parse_function_args(input: &mut &Tokens) -> Result<Punctuated<Entity>> {
-    punctuated(parse_function_arg, Token::Comma).parse_next(input)
+pub fn parse_function_args(ctx: &mut Context, input: &mut &Tokens) -> PResult<Punctuated<Entity>> {
+    punctuated(parse_function_arg, Token::Comma).parse(ctx, input)
 }
 
-pub fn parse_function_arg(input: &mut &Tokens) -> Result<Entity> {
+pub fn parse_function_arg(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let (attributes, name, colon, ty) =
-        (parse_attribute_lists, ident, just(Token::Colon), parse_type).parse_next(input)?;
+        (parse_attribute_lists, ident, just(Token::Colon), parse_type).parse(ctx, input)?;
     Ok(Cst::FunctionArg {
         attributes,
         name,
         colon,
         ty,
     }
-    .to_column())
+    .spawn(ctx))
 }
 
-pub fn parse_field_init(input: &mut &Tokens) -> Result<Entity> {
-    let (name, colon, value) = (ident, just(Token::Colon), parse_expr).parse_next(input)?;
-    Ok(Cst::FieldInitializer { name, colon, value }.to_column())
+pub fn parse_field_init(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    let (name, colon, value) = (ident, just(Token::Colon), parse_expr).parse(ctx, input)?;
+    Ok(Cst::FieldInitializer { name, colon, value }.spawn(ctx))
 }
 
 /// Returns a tuple of (exprs, items)
-pub fn parse_exprs_and_items(input: &mut &Tokens) -> Result<(Vec<Entity>, Vec<Entity>)> {
+pub fn parse_exprs_and_items(
+    ctx: &mut Context,
+    input: &mut &Tokens,
+) -> PResult<(Vec<Entity>, Vec<Entity>)> {
     let mut exprs = vec![];
     let mut items = vec![];
 
     loop {
-        match parse_item(input) {
+        let checkpoint = *input;
+        match parse_item(ctx, input) {
             Ok(item) => {
                 items.push(item);
                 continue;
             }
-            Err(ErrMode::Backtrack(_)) => (),
-            Err(err) => return Err(err),
+            Err(Backtrack) => *input = checkpoint,
         }
-        match parse_expr(input) {
+        let checkpoint = *input;
+        match parse_expr(ctx, input) {
             Ok(expr) => {
                 exprs.push(expr);
                 continue;
             }
-            Err(ErrMode::Backtrack(_)) => break,
-            Err(err) => return Err(err),
+            Err(Backtrack) => {
+                *input = checkpoint;
+                break;
+            }
         }
     }
 
     Ok((exprs, items))
 }
 
-pub fn parse_expr_or_item(input: &mut &Tokens) -> Result<Entity> {
-    alt((parse_item, parse_expr, fail)).parse_next(input)
+pub fn parse_expr_or_item(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    alt((parse_item, parse_expr)).parse(ctx, input)
 }
 
-pub fn parse_exprs(input: &mut &Tokens) -> Result<Vec<Entity>> {
-    repeat(.., parse_expr).parse_next(input)
+pub fn parse_exprs(ctx: &mut Context, input: &mut &Tokens) -> PResult<Vec<Entity>> {
+    repeat(.., parse_expr).parse(ctx, input)
 }
 
-pub fn parse_atomic_expr(input: &mut &Tokens) -> Result<Entity> {
+pub fn parse_atomic_expr(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     alt((
         parse_record_ctor,
         parse_name_access,
         parse_string_literal,
         parse_char_literal,
     ))
-    .parse_next(input)
+    .parse(ctx, input)
 }
 
-pub fn parse_record_ctor(input: &mut &Tokens) -> Result<Entity> {
-    let (name, open_brace) = (ident, just(Token::OpenBrace)).parse_next(input)?;
-    let (fields, fill, close_brace) = cut_err((
+pub fn parse_record_ctor(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    let (name, open_brace) = (ident, just(Token::OpenBrace)).parse(ctx, input)?;
+    let (fields, fill, close_brace) = (
         punctuated(parse_field_init, Token::Comma),
         opt((just(Token::DoubleDot), parse_expr)),
         just(Token::CloseBrace),
-    ))
-    .parse_next(input)?;
+    )
+        .parse(ctx, input)?;
     Ok(Cst::RecordConstructor {
         name,
         braces: (open_brace, close_brace),
         fields,
         fill,
     }
-    .to_column())
+    .spawn(ctx))
 }
 
-pub fn parse_name_access(input: &mut &Tokens) -> Result<Entity> {
+pub fn parse_name_access(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let (name, args) = (
         ident,
         opt((
             just(Token::OpenParen),
-            cut_err(parse_expr_list),
-            cut_err(just(Token::CloseParen)),
+            parse_expr_list,
+            just(Token::CloseParen),
         )),
     )
-        .parse_next(input)?;
-    Ok(Cst::NameAccess { name, args }.to_column())
+        .parse(ctx, input)?;
+    Ok(Cst::NameAccess { name, args }.spawn(ctx))
 }
 
-pub fn parse_string_literal(input: &mut &Tokens) -> Result<Entity> {
-    let lit = string(input)?;
-    Ok(Cst::StringLiteral { lit }.to_column())
+pub fn parse_string_literal(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    let lit = string(ctx, input)?;
+    Ok(Cst::StringLiteral { lit }.spawn(ctx))
 }
 
-pub fn parse_char_literal(input: &mut &Tokens) -> Result<Entity> {
-    let lit = char(input)?;
-    Ok(Cst::CharLiteral { lit }.to_column())
+pub fn parse_char_literal(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    let lit = char(ctx, input)?;
+    Ok(Cst::CharLiteral { lit }.spawn(ctx))
 }
 
-pub fn parse_expr(input: &mut &Tokens) -> Result<Entity> {
-    alt((parse_member_access, parse_atomic_expr)).parse_next(input)
+pub fn parse_expr(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    alt((parse_member_access, parse_atomic_expr)).parse(ctx, input)
 }
 
-pub fn parse_expr_list(input: &mut &Tokens) -> Result<Punctuated<Entity>> {
-    punctuated(parse_expr, Token::Comma).parse_next(input)
+pub fn parse_expr_list(ctx: &mut Context, input: &mut &Tokens) -> PResult<Punctuated<Entity>> {
+    punctuated(parse_expr, Token::Comma).parse(ctx, input)
 }
 
-pub fn parse_member_access(input: &mut &Tokens) -> Result<Entity> {
-    let mut inner = parse_atomic_expr(input)?;
-    let mut extension = parse_member_access_extension(input)?;
+pub fn parse_member_access(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    let mut inner = parse_atomic_expr(ctx, input)?;
+    let mut extension = parse_member_access_extension(ctx, input)?;
 
-    loop {
-        match parse_member_access_extension(input) {
-            Ok(ext) => {
-                let (dot, name, args) = extension;
-                inner = Cst::MemberAccess {
-                    inner,
-                    dot,
-                    name,
-                    args,
-                }
-                .to_column();
-                extension = ext;
-            }
-            Err(ErrMode::Backtrack(_)) => break,
-            Err(err) => return Err(err),
+    let mut checkpoint = *input;
+    while let Ok(ext) = parse_member_access_extension(ctx, input) {
+        let (dot, name, args) = extension;
+        inner = Cst::MemberAccess {
+            inner,
+            dot,
+            name,
+            args,
         }
+        .spawn(ctx);
+        extension = ext;
+        checkpoint = *input;
     }
+    *input = checkpoint;
 
     let (dot, name, args) = extension;
     Ok(Cst::MemberAccess {
@@ -564,14 +552,15 @@ pub fn parse_member_access(input: &mut &Tokens) -> Result<Entity> {
         name,
         args,
     }
-    .to_column())
+    .spawn(ctx))
 }
 
 pub type ArgumentList = (Span, Punctuated<Entity>, Span);
 
 pub fn parse_member_access_extension(
+    ctx: &mut Context,
     input: &mut &Tokens,
-) -> Result<(Span, (Span, String), Option<ArgumentList>)> {
+) -> PResult<(Span, (Span, String), Option<ArgumentList>)> {
     (
         just(Token::Dot),
         ident,
@@ -581,22 +570,20 @@ pub fn parse_member_access_extension(
             just(Token::CloseParen),
         )),
     )
-        .parse_next(input)
+        .parse(ctx, input)
 }
 
-pub fn parse_type(input: &mut &Tokens) -> Result<Entity> {
-    let name = ident(input)?;
-    Ok(Cst::Type { name }.to_column())
+pub fn parse_type(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
+    let name = ident(ctx, input)?;
+    Ok(Cst::Type { name }.spawn(ctx))
 }
 
-pub fn parse_type_list(input: &mut &Tokens) -> Result<Punctuated<Entity>> {
-    punctuated(parse_type, Token::Comma).parse_next(input)
+pub fn parse_type_list(ctx: &mut Context, input: &mut &Tokens) -> PResult<Punctuated<Entity>> {
+    punctuated(parse_type, Token::Comma).parse(ctx, input)
 }
 
-pub fn parse_external_func(
-    attributes: &mut Vec<Entity>,
-) -> impl FnMut(&mut &Tokens) -> Result<Entity> + '_ {
-    |input| {
+pub fn parse_external_func(attributes: Vec<Entity>) -> impl Parser<Output = Entity> {
+    |ctx: &mut Context, input: &mut &Tokens| {
         let (external, function, name, open_paren, args, close_paren) = (
             just(Token::External),
             just(Token::Fn),
@@ -605,159 +592,172 @@ pub fn parse_external_func(
             parse_type_list,
             just(Token::CloseParen),
         )
-            .parse_next(input)?;
+            .parse(ctx, input)?;
         Ok(Cst::ExternalFunc {
             external,
-            attributes: std::mem::take(attributes),
+            attributes,
             function,
             name,
             parens: (open_paren, close_paren),
             args,
         }
-        .to_column())
+        .spawn(ctx))
     }
 }
 
-pub fn parse_attribute_list(input: &mut &Tokens) -> Result<Entity> {
+pub fn parse_attribute_list(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let (open_bracket, attributes, close_bracket) = (
         just(Token::OpenBracket),
         parse_expr_list,
         just(Token::CloseBracket),
     )
-        .parse_next(input)?;
+        .parse(ctx, input)?;
     Ok(Cst::AttributeList {
         brackets: (open_bracket, close_bracket),
         attributes,
     }
-    .to_column())
+    .spawn(ctx))
 }
 
-pub fn parse_attribute_lists(input: &mut &Tokens) -> Result<Vec<Entity>> {
-    repeat(.., parse_attribute_list).parse_next(input)
+pub fn parse_attribute_lists(ctx: &mut Context, input: &mut &Tokens) -> PResult<Vec<Entity>> {
+    repeat(.., parse_attribute_list).parse(ctx, input)
 }
 
 #[cfg(test)]
 mod test {
-    use apheleia_bookwyrm::lex;
-    use apheleia_prism::ColumnDebug;
+    use apheleia_bookwyrm::{lex, Token};
+    use apheleia_prism::prelude::bevy_ecs::system::CommandQueue;
+    use apheleia_prism::prelude::*;
 
     use crate::{
-        parse_attribute_list, parse_attribute_lists, parse_expr, parse_exprs, parse_external_func,
-        parse_function, parse_function_args, parse_items, parse_module, Cst,
+        just, opt, parse_attribute_list, parse_attribute_lists, parse_expr, parse_exprs,
+        parse_function, parse_function_args, parse_item, parse_items, Context, Cst, MandrakePlugin,
+        Parser, RootNode,
     };
 
-    #[test]
-    pub fn parse_char_into() {
-        let source = "'W'.Into";
+    fn test_source_as<Output: EcsTreeDebug>(source: &str, parser: impl Parser<Output = Output>) {
+        println!("Source: {source:?}");
         let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_expr(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+        let mut input = &tokens[..];
+        let mut queue = CommandQueue::default();
+        let mut world = World::new();
+        let mut ctx = Context {
+            commands: Commands::new(&mut queue, &world),
+            errors: (),
+        };
+        let cst = parser.parse_whole(&mut ctx, &mut input).unwrap();
+        queue.apply(&mut world);
+        println!("{:#?}", cst.component_dbg::<Cst>(&world))
     }
 
     #[test]
-    pub fn parse_putc_expr() {
-        let source = "Putc('W'.Into)";
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_expr(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+    fn parse_char_into() {
+        test_source_as("'W'.Into", parse_expr);
     }
 
     #[test]
-    pub fn parse_putc_exprs() {
-        let source = "Putc('W'.Into)";
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_exprs(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+    fn parse_ffi_default() {
+        test_source_as("FFI.Default", parse_expr);
     }
 
     #[test]
-    pub fn parse_empty_func_args() {
-        let source = "";
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_function_args(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+    fn parse_ffi_default_fill() {
+        test_source_as("..FFI.Default", opt((just(Token::DoubleDot), parse_expr)));
     }
 
     #[test]
-    pub fn parse_putc_function() {
-        let source = "fn Main() { Putc('W'.Into) }";
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_function(&mut vec![])(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+    fn parse_putc_expr() {
+        test_source_as("Putc('W'.Into)", parse_expr);
     }
 
     #[test]
-    pub fn parse_putc_main_items() {
-        let source = r#"
+    fn parse_putc_exprs() {
+        test_source_as("'W'.Into", parse_exprs);
+    }
+
+    #[test]
+    fn parse_empty_func_args() {
+        test_source_as("", parse_function_args);
+    }
+
+    #[test]
+    fn parse_putc_function() {
+        test_source_as("fn Main() { Putc('W'.Into) }", parse_function(vec![]));
+    }
+
+    #[test]
+    fn parse_putc_main_items() {
+        test_source_as(
+            r#"
             fn Main() {
                 Putc('W'.Into)
-            }"#;
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_items(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+            }
+            "#,
+            parse_items,
+        );
     }
 
     #[test]
-    pub fn parse_ffi_record() {
-        let source = r#"FFI { source: "C", name: "putc", ..FFI.Default }"#;
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_expr(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+    fn parse_ffi_record() {
+        test_source_as(
+            r#"FFI { source: "C", name: "putc", ..FFI.Default }"#,
+            parse_expr,
+        );
     }
 
     #[test]
-    pub fn parse_ffi_attribute() {
-        let source = r#"[FFI { source: "C", name: "putc", ..FFI.Default }]"#;
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_attribute_list(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+    fn parse_ffi_attribute_list() {
+        test_source_as(
+            r#"[FFI { source: "C", name: "putc", ..FFI.Default }]"#,
+            parse_attribute_list,
+        );
     }
 
     #[test]
-    pub fn parse_ffi_attribute_list() {
-        let source = r#"[FFI { source: "C", name: "putc", ..FFI.Default }]"#;
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_attribute_lists(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+    fn parse_ffi_attribute_lists() {
+        test_source_as(
+            r#"[FFI { source: "C", name: "putc", ..FFI.Default }]"#,
+            parse_attribute_lists,
+        );
     }
 
     #[test]
-    pub fn parse_ffi_extern_putc() {
-        let source = r#"
+    fn parse_ffi_extern_putc() {
+        test_source_as(
+            r#"
             [FFI { source: "C", name: "putc", ..FFI.Default }]
             external fn Putc(U8)
-        "#;
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let mut attrs = parse_attribute_lists(&mut cursor).unwrap();
-        let root = parse_external_func(&mut attrs)(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+            "#,
+            parse_item,
+        );
     }
 
     #[test]
-    pub fn parse_putc() {
+    fn parse_putc() {
         let source = r#"
             module Main
 
+            fn FFI() {}
+
+            fn Default() -> FFI {}
+
             [FFI { source: "C", name: "putc", ..FFI.Default }]
             external fn Putc(U8)
+
+            fn TryInto(char: Char) -> OptionU8 {}
+
+            fn Unwrap(option: OptionU8) -> U8 {}
 
             fn Main() {
                 Putc('W'.TryInto.Unwrap)
             }
-        "#;
-        let tokens = lex(source).unwrap();
-        let mut cursor = &tokens[..];
-        let root = parse_module(&mut vec![])(&mut cursor).unwrap();
-        println!("{:#?}", root.column_dbg::<Cst>());
+            "#;
+        let mut compiler = build_compiler(&[source]);
+        compiler.add_plugins(MandrakePlugin).run_once();
+        let cst = compiler
+            .world
+            .query_filtered::<Entity, With<RootNode>>()
+            .single(&compiler.world);
+        println!("{:#?}", cst.component_dbg::<Cst>(&compiler.world));
     }
 }
