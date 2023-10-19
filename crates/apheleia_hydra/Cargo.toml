@@ -6,9 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+apheleia_bestiary = { version = "0.1.0", path = "../apheleia_bestiary" }
 apheleia_mandrake = { version = "0.1.0", path = "../apheleia_mandrake" }
+apheleia_narcissus = { version = "0.1.0", path = "../apheleia_narcissus" }
 apheleia_prism = { version = "0.1.0", path = "../apheleia_prism" }
-thiserror = "1.0.48"
 
 [dev-dependencies]
-apheleia_bookwyrm = { path = "../apheleia_bookwyrm" }

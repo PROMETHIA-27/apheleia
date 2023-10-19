@@ -2,7 +2,6 @@ use std::ops::Range;
 
 use apheleia_bookwyrm::Token;
 use apheleia_prism::prelude::*;
-use apheleia_prism::EcsTreeDebug;
 pub use parsing::*;
 
 mod parsing;
@@ -34,12 +33,14 @@ impl<Data> Punctuated<Data> {
     where
         Data: Clone,
     {
+        self.iter().map(Data::clone).collect()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Data> {
         self.values
             .iter()
             .map(|(data, _)| data)
             .chain(self.last.as_ref())
-            .map(Data::clone)
-            .collect()
     }
 }
 
@@ -76,176 +77,171 @@ impl<Data: EcsTreeDebug> EcsTreeDebug for Punctuated<Data> {
     }
 }
 
-#[derive(Clone, Component, Debug, EcsTreeDebug)]
-pub enum Cst {
-    Module {
-        /// any attached attribute lists
-        attributes: Vec<Entity>,
-        /// the `module` keyword
-        module: Span,
-        /// the identifier of the module
-        name: (Span, String),
-        /// the `{` and `}` tokens, if present
-        braces: Option<(Span, Span)>,
-        /// the items of the module
-        items: Vec<Entity>,
-    },
-    Function {
-        /// any attached attribute lists
-        attributes: Vec<Entity>,
-        /// the `fn` keyword
-        function: Span,
-        /// the identifier of the function
-        name: (Span, String),
-        /// the argument parens
-        parens: (Span, Span),
-        /// the arguments
-        args: Punctuated<Entity>,
-        /// the `->` token and return type, if any
-        return_ty: Option<(Span, Entity)>,
-        /// the `{` and `}` tokens
-        braces: (Span, Span),
-        /// the contents of the function
-        body: Vec<Entity>,
-        /// any items declared in the body of the function
-        items: Vec<Entity>,
-    },
-    FunctionArg {
-        /// the attributes of the argument
-        attributes: Vec<Entity>,
-        /// the identifier of the argument
-        name: (Span, String),
-        /// the `:` token
-        colon: Span,
-        /// the type of the argument
-        ty: Entity,
-    },
-    RecordConstructor {
-        /// the identifier of the type to construct
-        name: (Span, String),
-        /// the `{` and `}` tokens
-        braces: (Span, Span),
-        /// the field initializers
-        fields: Punctuated<Entity>,
-        /// the `..expr` part of the declaration; declares that this constructor is actually overwriting
-        /// the value given by the expression. The first span is the `..` token.
-        fill: Option<(Span, Entity)>,
-    },
-    FieldInitializer {
-        /// the identifier of the field
-        name: (Span, String),
-        /// the `:` token
-        colon: Span,
-        /// the value of the field
-        value: Entity,
-    },
-    NameAccess {
-        /// the identifier of the element
-        name: (Span, String),
-        /// the arguments, if any
-        args: Option<(Span, Punctuated<Entity>, Span)>,
-    },
-    /// This name is somewhat misleading. This can correspond to a field access, method
-    /// call, or UFCS function call.
-    MemberAccess {
-        /// the expression having a member accessed
-        inner: Entity,
-        /// the `.` token
-        dot: Span,
-        /// the identifier of the member
-        name: (Span, String),
-        /// the arguments of a method/UFCS call, if any
-        args: Option<(Span, Punctuated<Entity>, Span)>,
-    },
-    StringLiteral {
-        /// the literal
-        lit: (Span, String),
-    },
-    CharLiteral {
-        /// the literal
-        lit: (Span, String),
-    },
-    Type {
-        /// the identifier of the type
-        name: (Span, String),
-    },
-    ExternalFunc {
-        /// any attached attribute lists
-        attributes: Vec<Entity>,
-        /// the `external` keyword
-        external: Span,
-        /// the `fn` keyword
-        function: Span,
-        /// the identifier of the function
-        name: (Span, String),
-        /// the argument parens
-        parens: (Span, Span),
-        /// the argument types
-        args: Punctuated<Entity>,
-    },
-    AttributeList {
-        brackets: (Span, Span),
-        attributes: Punctuated<Entity>,
-    },
-    Invalid {
-        span: Span,
-    },
+#[derive(Component, Debug, Visit)]
+pub struct Module {
+    /// any attached attribute lists
+    pub attributes: Vec<Entity>,
+    /// the `module` keyword
+    pub module: Span,
+    /// the identifier of the module
+    pub name: (Span, String),
+    /// the `{` and `}` tokens, if present
+    pub braces: Option<(Span, Span)>,
+    /// the items of the module
+    pub items: Vec<Entity>,
 }
 
-impl Cst {
-    pub fn spawn(self, ctx: &mut Context) -> Entity {
-        ctx.commands.spawn(self).id()
-    }
+#[derive(Component, Debug, Visit)]
+pub struct FunctionDef {
+    /// any attached attribute lists
+    pub attributes: Vec<Entity>,
+    /// the `fn` keyword
+    pub function: Span,
+    /// the identifier of the function
+    pub name: (Span, String),
+    /// the argument parens
+    pub parens: (Span, Span),
+    /// the arguments
+    pub args: Punctuated<Entity>,
+    /// the `->` token and return type, if any
+    pub return_ty: Option<(Span, Entity)>,
+    /// the `{` and `}` tokens
+    pub braces: (Span, Span),
+    /// the contents of the function
+    pub body: Vec<Entity>,
+    /// any items declared in the body of the function
+    pub items: Vec<Entity>,
+}
 
-    // pub fn span(&self) -> Span {
-    //     match self {
-    //         Cst::Module {
-    //             module,
-    //             name,
-    //             braces,
-    //             items: contents,
-    //             ..
-    //         } => {
-    //             module.start..match braces {
-    //                 Some(braces) => braces.1.end,
-    //                 None => match contents.last() {
-    //                     Some(last) => last.on_column(Cst::span).end,
-    //                     None => name.0.end,
-    //                 },
-    //             }
-    //         }
-    //         Cst::Function {
-    //             function, braces, ..
-    //         } => function.start..braces.1.end,
-    //         Cst::FunctionArg { name, ty, .. } => name.0.start..ty.on_column(Cst::span).end,
-    //         Cst::RecordConstructor { name, braces, .. } => name.0.start..braces.1.end,
-    //         Cst::FieldInitializer { name, value, .. } => {
-    //             name.0.start..value.on_column(Cst::span).end
-    //         }
-    //         Cst::NameAccess { name, args } => {
-    //             name.0.start..match args {
-    //                 Some(args) => args.2.end,
-    //                 None => name.0.end,
-    //             }
-    //         }
-    //         Cst::MemberAccess {
-    //             inner, name, args, ..
-    //         } => {
-    //             inner.on_column(Cst::span).start..match args {
-    //                 Some(args) => args.2.end,
-    //                 None => name.0.end,
-    //             }
-    //         }
-    //         Cst::StringLiteral { lit } => lit.0.clone(),
-    //         Cst::CharLiteral { lit } => lit.0.clone(),
-    //         Cst::Type { name } => name.0.clone(),
-    //         Cst::ExternalFunc {
-    //             function, parens, ..
-    //         } => function.start..parens.1.end,
-    //         Cst::AttributeList { brackets, .. } => brackets.0.start..brackets.1.end,
-    //         Cst::Invalid { span } => span.clone(),
-    //     }
-    // }
+#[derive(Component, Debug, Visit)]
+pub struct FunctionArg {
+    /// the attributes of the argument
+    pub attributes: Vec<Entity>,
+    /// the identifier of the argument
+    pub name: (Span, String),
+    /// the `:` token
+    pub colon: Span,
+    /// the type of the argument
+    pub ty: Entity,
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct RecordConstructor {
+    /// the type to construct
+    pub ty: Entity,
+    /// the `{` and `}` tokens
+    pub braces: (Span, Span),
+    /// the field initializers
+    pub fields: Punctuated<Entity>,
+    /// the `..expr` part of the declaration; declares that this constructor is actually overwriting
+    /// the value given by the expression. The first span is the `..` token.
+    pub fill: Option<(Span, Entity)>,
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct FieldInitializer {
+    /// the identifier of the field
+    pub name: (Span, String),
+    /// the `:` token
+    pub colon: Span,
+    /// the value of the field
+    pub value: Entity,
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct NameAccess {
+    /// the identifier of the element
+    pub name: (Span, String),
+    /// the arguments, if any
+    pub args: Option<(Span, Punctuated<Entity>, Span)>,
+}
+
+/// This name is somewhat misleading. This can correspond to a field access, method
+/// call, or UFCS function call.
+#[derive(Component, Debug, Visit)]
+pub struct MemberAccess {
+    /// the expression having a member accessed
+    pub inner: Entity,
+    /// the `.` token
+    pub dot: Span,
+    /// the identifier of the member
+    pub name: (Span, String),
+    /// the arguments of a method/UFCS call, if any
+    pub args: Option<(Span, Punctuated<Entity>, Span)>,
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct StringLiteral {
+    /// the literal
+    pub lit: (Span, String),
+}
+
+impl StringLiteral {
+    pub fn value(&self) -> &str {
+        &self.lit.1[1..self.lit.1.len() - 1]
+    }
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct CharLiteral {
+    /// the literal
+    pub lit: (Span, String),
+}
+
+impl CharLiteral {
+    pub fn value(&self) -> char {
+        self.lit.1.chars().nth(1).unwrap()
+    }
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct Type {
+    /// the identifier of the type
+    pub name: (Span, String),
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct ExternalFunc {
+    /// any attached attribute lists
+    pub attributes: Vec<Entity>,
+    /// the `external` keyword
+    pub external: Span,
+    /// the `fn` keyword
+    pub function: Span,
+    /// the identifier of the function
+    pub name: (Span, String),
+    /// the argument parens
+    pub parens: (Span, Span),
+    /// the argument types
+    pub args: Punctuated<Entity>,
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct AttributeList {
+    pub brackets: (Span, Span),
+    pub attributes: Punctuated<Entity>,
+}
+
+#[derive(Component, Debug, Visit)]
+pub struct Invalid {
+    pub span: Span,
+}
+
+#[derive(Copy, Clone, Component, Debug, Dispatch, EcsTreeDebug)]
+pub enum Cst {
+    Module,
+    FunctionDef,
+    FunctionArg,
+    RecordConstructor,
+    FieldInitializer,
+    NameAccess,
+    MemberAccess,
+    StringLiteral,
+    CharLiteral,
+    Type,
+    ExternalFunc,
+    AttributeList,
+    Invalid,
 }
 
 pub struct MandrakePlugin;
@@ -270,18 +266,18 @@ pub fn parse_sources(c: Commands, sources: Res<SourceFiles>) {
     for (_, source) in sources.files.iter() {
         // TODO: Dump these errors into errors/turn into invalid nodes
         let tokens = apheleia_bookwyrm::lex(source).unwrap();
-        let root = parse(&mut ctx, &tokens[..]).unwrap();
+        let root = parse(&mut ctx, &tokens[..]);
         ctx.commands.entity(root).insert(RootNode);
     }
 }
 
-pub fn parse(ctx: &mut Context, mut tokens: &Tokens) -> std::result::Result<Entity, ()> {
+pub fn parse(ctx: &mut Context, mut tokens: &Tokens) -> Entity {
     (|ctx: &mut Context, input: &mut &Tokens| {
         let attributes = parse_attribute_lists(ctx, input)?;
         parse_module(attributes).parse(ctx, input)
     })
     .parse_whole(ctx, &mut tokens)
-    .map_err(|_| ())
+    .unwrap()
 }
 
 fn string(_: &mut Context, input: &mut &Tokens) -> PResult<(Span, String)> {
@@ -341,14 +337,19 @@ pub fn parse_module(attributes: Vec<Entity>) -> impl Parser<Output = Entity> {
             Some((braces, contents)) => (Some(braces), contents),
             _ => (None, parse_items(ctx, input)?),
         };
-        Ok(Cst::Module {
-            attributes,
-            module,
-            name,
-            braces,
-            items: contents,
-        }
-        .spawn(ctx))
+        Ok(ctx
+            .commands
+            .spawn((
+                Cst::Module,
+                Module {
+                    attributes,
+                    module,
+                    name,
+                    braces,
+                    items: contents,
+                },
+            ))
+            .id())
     }
 }
 
@@ -391,18 +392,23 @@ pub fn parse_function(attributes: Vec<Entity>) -> impl Parser<Output = Entity> {
             just(Token::CloseBrace),
         )
             .parse(ctx, input)?;
-        Ok(Cst::Function {
-            attributes,
-            function,
-            name,
-            parens: (open_paren, close_paren),
-            args,
-            return_ty,
-            braces: (open_brace, close_brace),
-            body,
-            items,
-        }
-        .spawn(ctx))
+        Ok(ctx
+            .commands
+            .spawn((
+                Cst::FunctionDef,
+                FunctionDef {
+                    attributes,
+                    function,
+                    name,
+                    parens: (open_paren, close_paren),
+                    args,
+                    return_ty,
+                    braces: (open_brace, close_brace),
+                    body,
+                    items,
+                },
+            ))
+            .id())
     }
 }
 
@@ -413,18 +419,29 @@ pub fn parse_function_args(ctx: &mut Context, input: &mut &Tokens) -> PResult<Pu
 pub fn parse_function_arg(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let (attributes, name, colon, ty) =
         (parse_attribute_lists, ident, just(Token::Colon), parse_type).parse(ctx, input)?;
-    Ok(Cst::FunctionArg {
-        attributes,
-        name,
-        colon,
-        ty,
-    }
-    .spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((
+            Cst::FunctionArg,
+            FunctionArg {
+                attributes,
+                name,
+                colon,
+                ty,
+            },
+        ))
+        .id())
 }
 
 pub fn parse_field_init(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let (name, colon, value) = (ident, just(Token::Colon), parse_expr).parse(ctx, input)?;
-    Ok(Cst::FieldInitializer { name, colon, value }.spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((
+            Cst::FieldInitializer,
+            FieldInitializer { name, colon, value },
+        ))
+        .id())
 }
 
 /// Returns a tuple of (exprs, items)
@@ -479,20 +496,25 @@ pub fn parse_atomic_expr(ctx: &mut Context, input: &mut &Tokens) -> PResult<Enti
 }
 
 pub fn parse_record_ctor(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
-    let (name, open_brace) = (ident, just(Token::OpenBrace)).parse(ctx, input)?;
+    let (ty, open_brace) = (parse_type, just(Token::OpenBrace)).parse(ctx, input)?;
     let (fields, fill, close_brace) = (
         punctuated(parse_field_init, Token::Comma),
         opt((just(Token::DoubleDot), parse_expr)),
         just(Token::CloseBrace),
     )
         .parse(ctx, input)?;
-    Ok(Cst::RecordConstructor {
-        name,
-        braces: (open_brace, close_brace),
-        fields,
-        fill,
-    }
-    .spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((
+            Cst::RecordConstructor,
+            RecordConstructor {
+                ty,
+                braces: (open_brace, close_brace),
+                fields,
+                fill,
+            },
+        ))
+        .id())
 }
 
 pub fn parse_name_access(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
@@ -505,17 +527,26 @@ pub fn parse_name_access(ctx: &mut Context, input: &mut &Tokens) -> PResult<Enti
         )),
     )
         .parse(ctx, input)?;
-    Ok(Cst::NameAccess { name, args }.spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((Cst::NameAccess, NameAccess { name, args }))
+        .id())
 }
 
 pub fn parse_string_literal(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let lit = string(ctx, input)?;
-    Ok(Cst::StringLiteral { lit }.spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((Cst::StringLiteral, StringLiteral { lit }))
+        .id())
 }
 
 pub fn parse_char_literal(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let lit = char(ctx, input)?;
-    Ok(Cst::CharLiteral { lit }.spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((Cst::CharLiteral, CharLiteral { lit }))
+        .id())
 }
 
 pub fn parse_expr(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
@@ -533,26 +564,36 @@ pub fn parse_member_access(ctx: &mut Context, input: &mut &Tokens) -> PResult<En
     let mut checkpoint = *input;
     while let Ok(ext) = parse_member_access_extension(ctx, input) {
         let (dot, name, args) = extension;
-        inner = Cst::MemberAccess {
-            inner,
-            dot,
-            name,
-            args,
-        }
-        .spawn(ctx);
+        inner = ctx
+            .commands
+            .spawn((
+                Cst::MemberAccess,
+                MemberAccess {
+                    inner,
+                    dot,
+                    name,
+                    args,
+                },
+            ))
+            .id();
         extension = ext;
         checkpoint = *input;
     }
     *input = checkpoint;
 
     let (dot, name, args) = extension;
-    Ok(Cst::MemberAccess {
-        inner,
-        dot,
-        name,
-        args,
-    }
-    .spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((
+            Cst::MemberAccess,
+            MemberAccess {
+                inner,
+                dot,
+                name,
+                args,
+            },
+        ))
+        .id())
 }
 
 pub type ArgumentList = (Span, Punctuated<Entity>, Span);
@@ -575,7 +616,7 @@ pub fn parse_member_access_extension(
 
 pub fn parse_type(ctx: &mut Context, input: &mut &Tokens) -> PResult<Entity> {
     let name = ident(ctx, input)?;
-    Ok(Cst::Type { name }.spawn(ctx))
+    Ok(ctx.commands.spawn((Cst::Type, Type { name })).id())
 }
 
 pub fn parse_type_list(ctx: &mut Context, input: &mut &Tokens) -> PResult<Punctuated<Entity>> {
@@ -593,15 +634,20 @@ pub fn parse_external_func(attributes: Vec<Entity>) -> impl Parser<Output = Enti
             just(Token::CloseParen),
         )
             .parse(ctx, input)?;
-        Ok(Cst::ExternalFunc {
-            external,
-            attributes,
-            function,
-            name,
-            parens: (open_paren, close_paren),
-            args,
-        }
-        .spawn(ctx))
+        Ok(ctx
+            .commands
+            .spawn((
+                Cst::ExternalFunc,
+                ExternalFunc {
+                    external,
+                    attributes,
+                    function,
+                    name,
+                    parens: (open_paren, close_paren),
+                    args,
+                },
+            ))
+            .id())
     }
 }
 
@@ -612,11 +658,16 @@ pub fn parse_attribute_list(ctx: &mut Context, input: &mut &Tokens) -> PResult<E
         just(Token::CloseBracket),
     )
         .parse(ctx, input)?;
-    Ok(Cst::AttributeList {
-        brackets: (open_bracket, close_bracket),
-        attributes,
-    }
-    .spawn(ctx))
+    Ok(ctx
+        .commands
+        .spawn((
+            Cst::AttributeList,
+            AttributeList {
+                brackets: (open_bracket, close_bracket),
+                attributes,
+            },
+        ))
+        .id())
 }
 
 pub fn parse_attribute_lists(ctx: &mut Context, input: &mut &Tokens) -> PResult<Vec<Entity>> {

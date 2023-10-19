@@ -9,7 +9,7 @@ use bevy_ecs::system::Resource;
 use bevy_ecs::world::World;
 
 pub mod prelude {
-    pub use apheleia_macro::EcsTreeDebug;
+    pub use apheleia_macro::{impl_for_all, Dispatch, EcsTreeDebug, Visit};
 
     pub use bevy_ecs;
     pub use bevy_ecs::prelude::*;
@@ -17,10 +17,13 @@ pub mod prelude {
     pub use bevy_app;
     pub use bevy_app::prelude::*;
 
+    pub use super::traversal::{Dispatch, DispatchHelper, Operate, Operation, Visit};
     pub use super::{
-        build_compiler, ir_tree, DebugAsEcsTree, EcsTreeDebug, RootNode, RunAppOnce, SourceFiles,
+        build_compiler, DebugAsEcsTree, EcsTreeDebug, RootNode, RunAppOnce, SourceFiles,
     };
 }
+
+mod traversal;
 
 pub fn build_compiler(sources: &[&str]) -> App {
     let mut app = App::empty();
@@ -34,6 +37,9 @@ pub fn build_compiler(sources: &[&str]) -> App {
 }
 
 pub trait RunAppOnce {
+    /// [`bevy_ecs`]'s default behavior when running the [`App`] is to consume the [`World`] inside.
+    /// This is inconvenient when trying to use what is left in the world after running, so this
+    /// function will run the app's schedule once *without* consuming the world.
     fn run_once(&mut self);
 }
 
@@ -178,76 +184,4 @@ impl<T: EcsTreeDebug> EcsTreeDebug for Option<T> {
             None => f.write_str("None"),
         }
     }
-}
-
-#[macro_export]
-macro_rules! ir_tree {
-    (
-        #[from($prev_ir:ident)]
-        $(
-            #[$($attrs:meta)*]
-        )*
-        $vis:vis enum $name:ident {
-            unchanged {
-                $(
-                    $old_variant:ident {
-                        $(
-                            $old_field_name:ident : $old_field_ty:ty,
-                        )*
-                    },
-                )*
-            }
-            new {
-                $(
-                    $new_variant:ident {
-                        $(
-                            $new_field_name:ident : $new_field_ty:ty,
-                        )*
-                    },
-                )*
-            }
-        }
-    ) => {
-        $(
-            #[$($attrs)*]
-        )*
-        $vis enum $name {
-            $(
-                $old_variant {
-                    $(
-                        $old_field_name: $old_field_ty,
-                    )*
-                },
-            )*
-            $(
-                $new_variant {
-                    $(
-                        $new_field_name: $new_field_ty,
-                    )*
-                },
-            )*
-        }
-
-        impl<'ir> From<&'ir $prev_ir> for $name {
-            fn from(prev: &'ir $prev_ir) -> Self {
-                match prev {
-                    $(
-                        $prev_ir::$old_variant {
-                            $($old_field_name,)*
-                        } => {
-                            $name::$old_variant {
-                                $($old_field_name: $old_field_name.clone(),)*
-                            }
-                        },
-                    )*
-                    _ => unreachable!("{} node could not be converted into a {} node automatically",
-                        ::std::stringify!($prev_ir),
-                        ::std::stringify!($name),
-                    ),
-                }
-            }
-        }
-    };
-
-    (@check_unchanged unchanged) => {};
 }
